@@ -18,7 +18,11 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
-
+#//
+import json
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
+#//
 # Charts
 import matplotlib
 matplotlib.use("Agg")
@@ -31,7 +35,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont  # ← built-in CJK
-
+pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light")) 
 # register built-in Simplified Chinese font
 pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
@@ -46,7 +50,7 @@ TRANS_MODEL_ID = "Helsinki-NLP/opus-mt-en-zh"
 
 # ---------------- Streamlit UI ----------------
 st.set_page_config(page_title="AI Analysis of Historic Architecture", layout="wide")
-st.title("AI Framework for Harmony in Architecture / 建筑和谐的人工智能框架")
+st.title("AI Analysis of Historic Architecture / 歷史建築的人工智慧分析")
 st.title('')
 
 
@@ -525,15 +529,29 @@ def write_story(metrics: dict, lang: str = "en") -> str:
     elif w2w <= 0.10: hints.append("solid masonry presence")
     else: hints.append("comfortable window pattern")
 
+    # prompt = (
+    #     "You are an architecture narrator.\n"
+    #     "Write EXACTLY three paragraphs, each 4 to 6 short sentences.\n"
+    #     "Keep language simple. No style labels. No numbers. No bullet points.\n"
+    #     "Focus on balance, symmetry, rhythm, light, and crafted details.\n"
+    #     "Describe what the eye notices first, then what rewards a closer look.\n"
+    #     f"Hints: {', '.join(hints)}\n"
+    #     "Return only prose paragraphs separated by a blank line."
+    # )
     prompt = (
-        "You are an architecture narrator.\n"
-        "Write EXACTLY three paragraphs, each 4 to 6 short sentences.\n"
-        "Keep language simple. No style labels. No numbers. No bullet points.\n"
-        "Focus on balance, symmetry, rhythm, light, and crafted details.\n"
-        "Describe what the eye notices first, then what rewards a closer look.\n"
-        f"Hints: {', '.join(hints)}\n"
-        "Return only prose paragraphs separated by a blank line."
+    "Write analysis for the article title 'AI Analysis of Historic Architecture'.\n"
+    "Produce EXACTLY three paragraphs. Each paragraph has 4–6 short, complete sentences.\n"
+    "Plain English. Present tense. Active voice. Only commas and periods.\n"
+    "Do NOT mention AI, titles, prompts, paragraphs, sentences, or your process.\n"
+    "Do NOT use labels, numbers, lists, or single-word sentences.\n"
+    "Begin with what the eye notices first from a distance.\n"
+    "Then explain balance, symmetry, proportion, and rhythm using concrete parts such as arches, bays, columns, cornices, joints, and openings.\n"
+    "Finish with crafted details, materials, light and shadow, and signs of wear or repair at human scale.\n"
+    f"Integrate these hints smoothly without listing them: {', '.join(hints)}\n"
+    "Avoid repeating the same word at the start of adjacent sentences.\n"
+    "Return only the three paragraphs separated by one blank line."
     )
+
 
     enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
     gen_kwargs = dict(
@@ -684,12 +702,12 @@ def make_report(orig_img, overlay_img, heat_img, viz_img, metrics, ranking, stor
     COL_W = (W - LM - RM - 20) / 3.0   # three columns + 10pt gutters
 
     # ---------- header (static title) ----------
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(LM, y, "AI-Based Aesthetic Analysis of Historic Architecture")
+    c.setFont("STSong-Light", 16)
+    c.drawString(LM, y, "AI Analysis of Historic Architecture / 历史建筑的人工智能分析")
     y -= 24
-    c.setFont("Helvetica", 10)
+    c.setFont("STSong-Light", 10)
     import time as _t
-    c.drawString(LM, y, _t.strftime("Generated on %Y-%m-%d %H:%M:%S"))
+    c.drawString(LM, y, _t.strftime("Generated on / 生成于 %Y-%m-%d %H:%M:%S"))
     y -= 12
 
     # ---------- helpers ----------
@@ -773,8 +791,8 @@ def make_report(orig_img, overlay_img, heat_img, viz_img, metrics, ranking, stor
         y = H - TOP
 
     # ---------- Story block ----------
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(LM, y, "Design Narrative / 設計敘事")           # keep static label per your request
+    c.setFont("STSong-Light", 12)
+    c.drawString(LM, y, "Design Narrative / 设计叙事")   
     y -= 16
 
     body_font = "STSong-Light" if lang == "zh" else "Helvetica"
@@ -804,8 +822,8 @@ def make_report(orig_img, overlay_img, heat_img, viz_img, metrics, ranking, stor
     c.showPage()
     y = H - TOP
 
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(LM, y, "Aesthetic Visualization / 美學視覺化")
+    c.setFont("STSong-Light", 12)
+    c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
     y -= 12
 
     y_top_for_viz = y - 8
@@ -821,8 +839,8 @@ def make_report(orig_img, overlay_img, heat_img, viz_img, metrics, ranking, stor
     if y < BOT + 40:
         c.showPage(); y = H - TOP
 
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(LM, y, "Ranking")
+    c.setFont("STSong-Light", 12)
+    c.drawString(LM, y, "Ranking / 排行")
     y -= 14
     c.setFont("Helvetica", 10)
     c.drawString(

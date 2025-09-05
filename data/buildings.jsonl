@@ -1,0 +1,14 @@
+{"id":"colosseum",
+"name":"Colosseum",
+"location":"Rome,Italy",
+"era":"Flavian, first century",
+"style":"Roman amphitheatre",
+"massing":"elliptical ring with tiered arcades",
+"structure":"concrete core with travertine cladding and radial walls",
+"elements":["arches","bays","engaged columns","cornices","keystones"],
+"materials":["travertine","brick","tuff"],
+"condition":"upper ring losses with later brick repairs",
+"history":"Built under Vespasian and Titus for public spectacles.",
+"intro":"A vast oval shell frames an arena with glowing arcades.",
+"image":"data/thumbs/colosseum.jpg"
+}
