@@ -1,14 +1,100 @@
-{"id":"colosseum",
-"name":"Colosseum",
-"location":"Rome,Italy",
-"era":"Flavian, first century",
-"style":"Roman amphitheatre",
-"massing":"elliptical ring with tiered arcades",
-"structure":"concrete core with travertine cladding and radial walls",
-"elements":["arches","bays","engaged columns","cornices","keystones"],
-"materials":["travertine","brick","tuff"],
-"condition":"upper ring losses with later brick repairs",
-"history":"Built under Vespasian and Titus for public spectacles.",
-"intro":"A vast oval shell frames an arena with glowing arcades.",
-"image":"data/thumbs/colosseum.jpg"
+{
+  "id": "westminster",
+  "image": "data/thumbs/westminster.png",
+  "name": "Palace of Westminster",
+  "location": "London, UK",
+  "era": "19th century AD",
+  "style": "Gothic Revival",
+  "materials": ["anston limestone", "iron", "brick", "concrete"],
+  "elements": ["towers", "pinnacles", "tracery", "buttresses", "arches", "bays"],
+  "massing": "long riverfront elevation in measured bays with towers and pinnacles",
+  "structure": "iron frame with brick and concrete backing clad in anston limestone",
+  "is_elliptical": false,
+  "tiers": null,
+  "has_dome": false,
+  "condition": "areas of weathering and repair",
+  "intro": "Seat of the UK Parliament rebuilt after the fire of 1834.",
+  "history": "The new Palace of Westminster was designed by Charles Barry with A.W.N. Pugin. Construction began in 1840 and continued for over 30 years, blending Gothic Revival style with modern structural methods. The medieval Westminster Hall survived the fire and was integrated into the new complex.",
+  "narrative": {
+    "p1": "The Palace of Westminster is in London, UK. It was built in the 19th century AD. The new palace was designed by Charles Barry with A.W.N. Pugin after the fire of 1834. Construction began in 1840 and continued for more than thirty years, integrating the medieval Westminster Hall into the complex. The long riverfront elevation steps in measured bays, with towers and pinnacles marking the skyline.",
+    "p2": "Pointed arches, vertical tracery, and buttresses set a Gothic rhythm along the facade. Stacked wall planes and regular bay spacing organize the breadth of the building. The structure combines an iron frame with brick and concrete backing, clothed in anston limestone. Towers and pinnacles punctuate the roofline and give a clear hierarchy to the mass. The repeating bays create rhythm and proportion that relate to movement along the embankment.",
+    "p3": "At ground level, the stone shows crisp carving and areas of weathering and repair. Anston limestone reads pale and fine grained, while brick and concrete add warmth and depth. Light and shadow shift across the tracery and buttresses, giving the exterior both intricacy and clarity. Even today, the Palace of Westminster remains a powerful symbol of British governance and public life."
+  },
+  "story": "From across the Thames, the long riverfront of the Palace steps in measured bays punctuated by towers and pinnacles. Vertical tracery, pointed arches, and intricate stone carving give the facade a rhythm that recalls medieval precedent while projecting 19th century ambition. Rising above all is the Elizabeth Tower, commonly known as Big Ben, which anchors the skyline. The use of Anston limestone on an iron frame combines strength with ornament, while weathering and repairs add layers of texture. Today the Palace of Westminster remains one of the most recognized landmarks in the world, a symbol of British governance and identity.",
+  "last_verified": "2025-09-06",
+   "interiors": [
+    {"image": "data/interior_images/westminster/abbey.png", "caption": "High Altar of Westminster Abbey / 威斯敏斯特教堂的高坛"},
+    {"image": "data/interior_images/westminster/Vaulted.png", "caption": "Vaulted ceiling of Westminster Abbey / 威斯敏斯特教堂的拱形天花板"}
+  ]
+}
+
+
+{
+  "id": "colosseum",
+  "image": "data/thumbs/colosseum.png",
+  "name": "Colosseum",
+  "location": "Rome, Italy",
+  "era": "1st century AD",
+  "style": "Ancient Roman",
+  "materials": ["travertine", "tuff", "brick", "roman concrete"],
+  "elements": ["arcades", "arches", "engaged columns", "barrel vaults", "radial walls", "tiers"],
+  "massing": "oval shell in four tiers with superposed arcades and an attic",
+  "structure": "roman concrete and stone with radial walls and vaults",
+  "is_elliptical": true,
+  "tiers": 4,
+  "has_dome": false,
+  "condition": "partial ruin with areas of repair",
+  "intro": "Flavian amphitheatre at the heart of imperial Rome.",
+  "history": "Construction began under Emperor Vespasian around AD 70 and the amphitheatre was inaugurated in AD 80 by Titus. Later, Domitian added further modifications.",
+  "narrative": {
+    "p1": "The Colosseum is in Rome, Italy. It was built in the 1st century AD. Construction began under Emperor Vespasian around AD 70, and the amphitheatre was inaugurated in AD 80 by his son Titus. Later, Domitian added further modifications. The oval form rises in four tiers, with engaged columns articulating the openings.",
+    "p2": "Barrel vaults and radial walls carry the seating areas, while stacked arcades march around the exterior. The structure was built with travertine, tuff, brick, and roman concrete, showing both strength and adaptability. Its scale is monumental, yet the repeating arches and bays create rhythm and proportion that relate to human movement.",
+    "p3": "At ground level, the surfaces reveal textures of stone and masonry. Travertine blocks feel smooth and pale, while brick and roman concrete add warmth and variation. Light and shadow shift across the arches, giving the exterior both grandeur and intimacy. Even in partial ruin, the Colosseum remains a powerful symbol of Roman engineering and public life."
+  },
+  "last_verified": "2025-09-06",
+   "interiors": [
+    {"image": "data/interior_images/colosseum/panoramic.png", "caption": "Panoramic Interior / 全景内饰"},
+    {"image": "data/interior_images/colosseum/basement.png", "caption": "Basement, known as the Hypogeum / 地下室，又称地下宫殿"}
+  ]
+}
+
+
+
+{
+  "id": "lin_chih_chu_memorial_hall",
+  "image": "data/thumbs/lin_chih_chu.png",
+  "name": "Lin Chih-chu Memorial Hall",
+  "location": "Taichung City, Taiwan (R.O.C.)",
+  "era": "1941 (established), opened to public 2015",
+  "style": "Japanese official residence",
+  "materials": ["wood", "traditional Japanese architecture materials"],
+  "elements": ["single-story residence layout", "wooden structures", "guest studio", "workspaces"],
+  "massing": "low, compact single-story structure with a garden setting",
+  "structure": "wooden construction typical of Japanese styles of the early 20th century",
+  "is_elliptical": false,
+  "tiers": 1,
+  "has_dome": false,
+  "condition": "restored and maintained historic building",
+  "intro": "Former faculty dormitory turned studio and residence of artist Lin Chih-chu, now a memorial hall.",
+  "history": "Built in 1941 as a faculty dormitory of National Taichung University of Education; became Lin’s studio and home for sixty years; designated a historic monument in 2007; opened to the public in 2015 as the Memorial Hall. ",
+  "narrative": {
+    "p1": "The building, constructed in 1941, originally served as a faculty dormitory for the National Taichung University of Education. After WWII, Lin Chih-chu transformed it into his studio and residence for six decades.",
+    "p2": "In 2007, it was designated as a historic monument by Taichung’s Cultural Affairs Bureau. Following renovation, it opened as a public memorial hall in 2015, preserving the space where the artist worked and lived gallery-style.",
+    "p3": "Visitors step into a preserved Japanese-style home filled with atmosphere: wooden floors, personal studio artifacts—pigments, glue, brushes—invoking the creative environment of Lin Chih-chu. The modest structure resonates with the quiet influence of the 'Father of Taiwanese Gouache Painting.'"
+  },
+  "last_verified": "2025-09-06",
+  "interiors": [
+    {
+      "image": "data/interior_images/lin_chih_chu_memorial_hall/inside_view.png",
+      "caption": "Inside View / 内部视图"
+    },
+    {
+      "image": "data/interior_images/lin_chih_chu_memorial_hall/living.jpeg",
+      "caption": "Living space of Lin Chih-chu / 居住空间"
+    },
+    {
+        "image":"data/interior_images/lin_chih_chu_memorial_hall/tree_.jpeg",
+        "caption":"Memorial hall in harmony with nature / 与自然和谐相处的纪念馆"
+    }
+  ]
 }

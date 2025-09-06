@@ -94,14 +94,71 @@ BAD_WORDS_ZH = [
     "[", "]", "_", "|", "—", "---", "___", "||", "|||", "_P1_", "_P2_", "_P3_"
 ]
 
-def build_bad_words_ids(tokenizer, words):
-    ids = []
-    for w in words:
-        toks = tokenizer.encode(w, add_special_tokens=False)
-        if toks:
-            ids.append(toks)
-    return ids
+def build_bad_words(t5_tok):
+    PHRASES = [
+        "AI Analysis of Historic Architecture",
+        "This article", "this article", "overview", "intended",
+        "introduction", "conclusion", "paragraph", "sentence",
+        "bullet", "label", "list", "outline", "prompt", "process",
+        "reader", "topic", "perspective",
+        # the repeated lines you saw:
+        "The rhythm stays even and welcoming",
+        "Light softens edges and lifts the surface",
+        "Small crafted touches reward a second look",
+        "The balance feels calm and sure",
+    ]
+    return [t5_tok(p, add_special_tokens=False).input_ids for p in PHRASES]
 
+
+# ---------- DB I/O ----------
+def load_cards_jsonl(path: str) -> List[Dict[str, Any]]:
+    cards, buf = [], ""
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line == "data:":
+                continue
+            buf = f"{buf}{(' ' if buf else '')}{line}"
+            try:
+                obj = json.loads(buf)
+                cards.append(obj)
+                buf = ""  # reset for next object
+            except json.JSONDecodeError:
+                # not complete yet; keep buffering
+                pass
+    if buf.strip():
+        raise ValueError("Incomplete JSON object at end of file")
+    return cards
+
+# ---------- CLIP setup ----------
+_CLIP = {"model": None, "proc": None, "device": None}
+
+def get_clip(device: str):
+    if _CLIP["model"] is None:
+        _CLIP["model"] = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+        _CLIP["proc"]  = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        _CLIP["device"] = device
+    return _CLIP["model"], _CLIP["proc"], _CLIP["device"]
+
+
+@torch.inference_mode()
+def embed_image(image_path: str, device: str) -> np.ndarray:
+    model, proc, _ = get_clip(device)
+    img = Image.open(image_path).convert("RGB")
+    inputs = proc(images=img, return_tensors="pt").to(device)
+    feats = model.get_image_features(**inputs)
+    v = feats[0].detach().cpu().numpy().astype(np.float32)
+    v /= (np.linalg.norm(v) + 1e-8)
+    return v
+
+def build_index(cards_path: str, index_npz: str, device: str) -> None:
+    cards = load_cards_jsonl(cards_path)
+    vecs, ids = [], []
+    for c in cards:
+        v = embed_image(c["image"], device)
+        vecs.append(v); ids.append(c["id"])
+    arr = np.stack(vecs, axis=0)  # [N, D]
+    np.savez(index_npz, ids=np.array(ids, dtype=object), vecs=arr, cards_path=cards_path)
 
 @st.cache_resource(show_spinner=True)
 def load_llm_and_clip():
@@ -124,6 +181,9 @@ def load_llm_and_clip():
         TRANS_MODEL_ID,
         torch_dtype=torch.float16 if device in ("cuda", "mps") else torch.float32
     ).to(device).eval()
+    #---load
+    device = str(next(t5.parameters()).device)
+    build_index("data/buildings.jsonl", "data/index_clip.npz", device)
 
     return device, t5_tok, t5, clip_proc, clip, zh_tok, zh_mt
 
@@ -135,8 +195,27 @@ try:
 except Exception as e:
     st.error(f"Model loading failed: {e}")
     st.stop()
-BAD_WORD_IDS_EN = build_bad_words_ids(t5_tok, BAD_WORDS_EN)
-BAD_WORD_IDS_ZH = build_bad_words_ids(t5_tok, BAD_WORDS_ZH)
+# BAD_WORD_IDS_EN = build_bad_words_ids(t5_tok, BAD_WORDS_EN)
+# BAD_WORD_IDS_ZH = build_bad_words_ids(t5_tok, BAD_WORDS_ZH)
+
+#------show interior images
+def show_interior_gallery(card: dict):
+    interiors = card.get("interiors") or []
+    if not interiors:
+        return
+    st.markdown("### Interior views")
+    cols = st.columns(3)
+    for i, item in enumerate(interiors):
+        path = item.get("image")
+        cap  = item.get("caption", "Interior view")
+        if not path:
+            continue
+        try:
+            img = Image.open(path).convert("RGB")
+            with cols[i % 3]:
+                st.image(img, caption=cap, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Could not load interior image: {path} ({e})")
 
 # ---------------- Visualization helpers ----------------
 def show_img(col_like, img, caption):
@@ -440,52 +519,9 @@ def _sent_tokenize_en(text: str) -> list[str]:
     # keep only sentences with >= 3 tokens
     return [s.strip() for s in parts if len(s.strip().split()) >= 3]
 
-def _clean_generated(text: str) -> str:
-    # remove tags, instructions, separators
-    text = re.sub(r"\[[^\]]+\]", " ", text)                  # [P1] etc.
-    text = re.sub(r"(?i)\b(hints?:.*|now write.*)\b", " ", text)
-    text = re.sub(r"[|_—\-]{2,}", " ", text)                 # junk separators
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
 def _join_paragraphs(paras: list[str]) -> str:
     return "\n\n".join(p.strip() for p in paras).strip()
 
-def _group_into_three_paragraphs(text_en: str,
-                                 min_per: int = 4,
-                                 max_per: int = 6) -> list[str]:
-    txt = _clean_generated(text_en)
-    sents = _sent_tokenize_en(txt)
-
-    # ensure we have enough sentences
-    filler_cycle = [
-        "The rhythm stays even and welcoming.",
-        "Light softens edges and lifts the surface.",
-        "Small crafted touches reward a second look.",
-        "The balance feels calm and sure."
-    ]
-    k = 0
-    while len(sents) < 12:
-        sents.append(filler_cycle[k % len(filler_cycle)])
-        k += 1
-
-    # allocate 3 blocks within [min_per, max_per]
-    n1 = min(max_per, max(min_per, len(sents) // 3))
-    n2 = min(max_per, max(min_per, (len(sents) - n1) // 2))
-    n3 = max(min_per, min(max_per, len(sents) - n1 - n2))
-
-    # if we still have extras, spill into the last paragraph up to max_per
-    extra = len(sents) - (n1 + n2 + n3)
-    n3 = min(max_per, n3 + max(0, extra))
-
-    p1 = " ".join(sents[:n1])
-    p2 = " ".join(sents[n1:n1+n2])
-    p3 = " ".join(sents[n1+n2:n1+n2+n3])
-
-    # last guardrails
-    if not p3:
-        p3 = "The scene settles with easy balance. Light and shade trade places through the day. Small crafted touches reward a second look. It feels made for people, not for show."
-    return [p1, p2, p3]
 
 @torch.inference_mode()
 def translate_en_to_zh(paragraphs_en: list[str]) -> list[str]:
@@ -511,9 +547,24 @@ def translate_en_to_zh(paragraphs_en: list[str]) -> list[str]:
     return outs
 
 # --- main generator ---
+#---- story write helpers-------
+
+# ---------- Build or update index ----------
+def load_index(index_npz: str) -> Tuple[List[str], np.ndarray, str]:
+    data = np.load(index_npz, allow_pickle=True)
+    return list(data["ids"]), data["vecs"], str(data["cards_path"])
+
 @torch.inference_mode()
-def write_story(metrics: dict, lang: str = "en") -> str:
-    # Build human hints from metrics
+def retrieve(image_path: str, index_npz: str, device: str) -> Tuple[Optional[Dict[str,Any]], float]:
+    ids, vecs, cards_path = load_index(index_npz)
+    q = embed_image(image_path, device)                       # [D]
+    sims = vecs @ q                                          # cosine (both normalized)
+    i = int(np.argmax(sims)); score = float(sims[i])
+    cards = load_cards_jsonl(cards_path)
+    id2card = {c["id"]: c for c in cards}
+    return id2card.get(ids[i]), score
+
+def build_hints(metrics: Dict[str, float]) -> List[str]:
     r  = metrics.get("facade_ratio_H_W", 1.5)
     v  = metrics.get("symmetry_vertical", 0.5)
     ry = metrics.get("rhythm_fft_peak", 1.0)
@@ -525,62 +576,571 @@ def write_story(metrics: dict, lang: str = "en") -> str:
     hints.append("strong symmetry" if v >= 0.65 else "relaxed symmetry")
     hints.append("clear repeating bays" if ry >= 1.2 else "soft rhythm")
     hints.append("rich ornament" if fr >= 1.55 else ("quiet detailing" if fr <= 1.25 else "measured detailing"))
-    if w2w >= 0.45: hints.append("glassy frontage")
-    elif w2w <= 0.10: hints.append("solid masonry presence")
-    else: hints.append("comfortable window pattern")
+    hints.append("glassy frontage" if w2w >= 0.45 else ("solid masonry presence" if w2w <= 0.10 else "comfortable window pattern"))
+    return hints
 
-    # prompt = (
-    #     "You are an architecture narrator.\n"
-    #     "Write EXACTLY three paragraphs, each 4 to 6 short sentences.\n"
-    #     "Keep language simple. No style labels. No numbers. No bullet points.\n"
-    #     "Focus on balance, symmetry, rhythm, light, and crafted details.\n"
-    #     "Describe what the eye notices first, then what rewards a closer look.\n"
-    #     f"Hints: {', '.join(hints)}\n"
-    #     "Return only prose paragraphs separated by a blank line."
-    # )
-    prompt = (
-    "Write analysis for the article title 'AI Analysis of Historic Architecture'.\n"
-    "Produce EXACTLY three paragraphs. Each paragraph has 4–6 short, complete sentences.\n"
-    "Plain English. Present tense. Active voice. Only commas and periods.\n"
-    "Do NOT mention AI, titles, prompts, paragraphs, sentences, or your process.\n"
-    "Do NOT use labels, numbers, lists, or single-word sentences.\n"
-    "Begin with what the eye notices first from a distance.\n"
-    "Then explain balance, symmetry, proportion, and rhythm using concrete parts such as arches, bays, columns, cornices, joints, and openings.\n"
-    "Finish with crafted details, materials, light and shadow, and signs of wear or repair at human scale.\n"
-    f"Integrate these hints smoothly without listing them: {', '.join(hints)}\n"
-    "Avoid repeating the same word at the start of adjacent sentences.\n"
-    "Return only the three paragraphs separated by one blank line."
+def build_context_from_card(card: Dict[str,Any], hints: List[str]) -> str:
+    parts = [
+        f"Name: {card['name']} in {card['location']}. Era: {card.get('era','')}. Style: {card.get('style','')}.",
+        f"Form: {card.get('massing','')}. Structure: {card.get('structure','')}.",
+        f"Elements: {', '.join(card.get('elements', []))}. Materials: {', '.join(card.get('materials', []))}.",
+        f"Order: {card.get('symmetry','')}. Rhythm: {card.get('rhythm','')}. Condition: {card.get('condition','')}.",
+        f"Intro: {card.get('intro','')}. History: {card.get('history','')}.",
+        f"Hints: {', '.join(hints)}."
+    ]
+    return " ".join([p for p in parts if p and p.strip()])
+
+# --- prompts (no seeding) ---
+# ---------- 1) helpers ----------
+
+def build_hints(metrics: dict) -> list[str]:
+    r  = metrics.get("facade_ratio_H_W", 1.5)
+    v  = metrics.get("symmetry_vertical", 0.5)
+    ry = metrics.get("rhythm_fft_peak", 1.0)
+    fr = metrics.get("fractal_dimension", 1.4)
+    w2w = metrics.get("window_to_wall_ratio", 0.22)
+    return [
+        "balanced overall" if 1.1 <= r <= 1.9 else ("slender vertical feel" if r > 2.0 else "grounded horizontal feel"),
+        "strong symmetry" if v >= 0.65 else "relaxed symmetry",
+        "clear repeating bays" if ry >= 1.2 else "soft rhythm",
+        "rich ornament" if fr >= 1.55 else ("quiet detailing" if fr <= 1.25 else "measured detailing"),
+        "glassy frontage" if w2w >= 0.45 else ("solid masonry presence" if w2w <= 0.10 else "comfortable window pattern"),
+    ]
+
+def build_facts_line(card: dict | None) -> str:
+    if not card:
+        return ""
+    parts = [
+        f"Name: {card.get('name','')} in {card.get('location','')}.",
+        f"Style: {card.get('style','')}. Era: {card.get('era','')}.",
+        f"Form: {card.get('massing','')}. Structure: {card.get('structure','')}.",
+        f"Order: {card.get('symmetry','')}. Rhythm: {card.get('rhythm','')}.",
+        f"Materials: {', '.join(card.get('materials', []))}.",
+        f"Condition: {card.get('condition','')}.",
+    ]
+    return " ".join(p for p in parts if p.strip())
+
+
+def build_bad_words(t5_tok):
+    banned = [
+        # meta/structure words the model keeps echoing
+        "article","this article","analysis","study","survey","review","guide","overview","research",
+        "paragraph","section","passage","label","list","reader",
+        "Describe","describe","Explain","explain",
+        # stale filler you keep seeing
+        "The rhythm stays even and welcoming",
+        "Light softens edges and lifts the surface",
+        "Small crafted touches reward a second look",
+        "The balance feels calm and sure",
+        "These passages are intended",
+        "This text is intended",
+    ]
+    return [t5_tok(b, add_special_tokens=False).input_ids for b in banned]
+
+def get_gen_kwargs(t5_tok):
+    return dict(
+        max_new_tokens=240,
+        do_sample=False,                 # deterministic, less drift
+        num_beams=8,
+        length_penalty=1.08,
+        no_repeat_ngram_size=6,
+        encoder_no_repeat_ngram_size=6,  # prevents copying from the prompt
+        repetition_penalty=1.4,
+        early_stopping=True,
+        bad_words_ids=build_bad_words(t5_tok),
     )
 
 
-    enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
-    gen_kwargs = dict(
-        max_new_tokens=320,
-        min_new_tokens=220,           # encourage 3 paras
-        do_sample=True,
-        temperature=0.7,
-        top_p=0.9,
-        no_repeat_ngram_size=3,
-        repetition_penalty=1.12,
-    )
-    # (optional) bad words list if you defined BAD_WORD_IDS_EN elsewhere
-    bad_ids = globals().get("BAD_WORD_IDS_EN")
-    if bad_ids is not None:
-        gen_kwargs["bad_words_ids"] = bad_ids
+# ---------- 2) writer (simple and grounded if image matches) ----------
 
-    out = t5_model.generate(**enc, **gen_kwargs)
-    text_en = t5_tok.decode(out[0], skip_special_tokens=True).strip()
-
-    # enforce 3 paragraphs
-    paras_en = _group_into_three_paragraphs(text_en)
-
-    if lang == "zh":
-        paras_zh = translate_en_to_zh(paras_en)
-        return _join_paragraphs(paras_zh)
-    return _join_paragraphs(paras_en)
 
 # @torch.inference_mode()
-# def write_story(metrics: dict, language: str = "en") -> str:
+# def write_story(metrics: dict,
+#                 lang: str = "en",
+#                 image_path: str | None = None,
+#                 index_npz: str = "data/index_clip.npz",
+#                 match_threshold: float = 0.22) -> str:
+
+#     hints  = build_hints(metrics)
+#     device = str(next(t5_model.parameters()).device)
+
+#     # try to ground using your CLIP index
+#     card = None
+#     if image_path and Path(index_npz).exists():
+#         try:
+#             c, score = retrieve(image_path, index_npz, device)  # your CLIP retrieve()
+#             if c and score >= match_threshold:
+#                 card = c
+#         except Exception:
+#             card = None
+
+#     facts  = build_facts_line(card)
+#     prompt = make_prompt_simple(facts, hints)
+
+#     enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
+#     out = t5_model.generate(**enc, **get_gen_kwargs(t5_tok))
+#     text = t5_tok.decode(out[0], skip_special_tokens=True).strip()
+
+#     # enforce exactly three paragraphs
+#     parts = [p.strip() for p in text.split("\n\n") if p.strip()]
+#     if len(parts) > 3: parts = parts[:3]
+#     while len(parts) < 3: parts.append("")
+#     text = "\n\n".join(parts)
+
+#     if lang == "zh" and "translate_en_to_zh" in globals():
+#         return _join_paragraphs(translate_en_to_zh(text.split("\n\n")))
+#     return text
+
+@torch.inference_mode()
+def write_story(
+    metrics: dict,
+    lang: str = "en",
+    image_path: Optional[str] = None,
+    index_npz: str = "data/index_clip.npz",
+    match_threshold: float = 0.22,
+    fewshot: Optional[List[Tuple[str, str]]] = None,
+    k_examples: int = 2,
+) -> str:
+    """
+    Generic 3-paragraph narrative with DB-first priority:
+
+      P1 — history & city context, then one clean form line.
+      P2 — exterior composition/structure/materials, rhythm vs. human movement.
+      P3 — ground-level experience (texture, light/shadow), concise significance.
+
+    Exterior-only. Only commas and periods. No meta language.
+    """
+    import re
+
+    device = str(next(t5_model.parameters()).device)
+
+    # ---------- retrieve nearest card (for grounding) ----------
+    card: Optional[dict] = None
+    if image_path and Path(index_npz).exists():
+        try:
+            c, s = retrieve(image_path, index_npz, device)
+            if c and s >= match_threshold:
+                card = c
+        except Exception:
+            card = None
+
+    # ---------- quick helpers ----------
+    def _norm(s: Optional[str]) -> str:
+        return re.sub(r"\s+", " ", s or "").strip()
+
+    def _norm_era(e: Optional[str]) -> str:
+        e2 = _norm(e)
+        if not e2: return ""
+        if "century" in e2.lower() and "ad" not in e2.lower():
+            return e2 + " AD"
+        return e2
+
+    def _uniq(seq):
+        out, seen = [], set()
+        for x in seq:
+            k = x.lower().strip()
+            if k and k not in seen:
+                seen.add(k); out.append(x)
+        return out
+
+    def _join(items: list[str]) -> str:
+        items = _uniq([i for i in items if i])
+        if not items: return ""
+        if len(items) == 1: return items[0]
+        return ", ".join(items[:-1]) + ", and " + items[-1]
+
+    def _clean_text(t: str) -> str:
+        t = re.sub(r"\[[^\]]+\]", " ", t)
+        t = re.sub(r"[;:–—_•\[\]\(\)]", " ", t)   # commas/periods only
+        # filter banned / vague
+        bans = [
+            r"\bporch(es)?\b", r"\binterior(s)?\b", r"\blobby\b",
+            r"\bsense of scale\b", r"\brectangular\s+oval\b",
+            r"\bround\s+tower\b", r"\bcircular\s+shaft\b", r"\bcauldron\b"
+        ]
+        for rx in bans:
+            t = re.sub(rx, "", t, flags=re.I)
+        t = re.sub(r"\s{2,}", " ", t).strip()
+        return t
+
+    def _sentences(text: str) -> list[str]:
+        return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text or "") if len(s.strip().split()) >= 3]
+
+    # ---------- DB fields ----------
+    name      = _norm((card or {}).get("name"))
+    loc       = _norm((card or {}).get("location"))
+    era       = _norm_era((card or {}).get("era"))
+    intro     = _norm((card or {}).get("intro"))
+    history   = _norm((card or {}).get("history"))
+    massing   = _norm((card or {}).get("massing"))
+    structure = _norm((card or {}).get("structure"))
+    style     = _norm((card or {}).get("style"))
+    condition = _norm((card or {}).get("condition"))
+
+    # Prefer curated 3-paragraph narrative if present
+    narrative = (card or {}).get("narrative")  # {"p1": "...","p2":"...","p3":"..."}
+    if isinstance(narrative, dict) and all(isinstance(narrative.get(k), str) and narrative.get(k).strip() for k in ("p1","p2","p3")):
+        p1 = _clean_text(narrative["p1"])
+        p2 = _clean_text(narrative["p2"])
+        p3 = _clean_text(narrative["p3"])
+        result_en = "\n\n".join([p for p in (p1, p2, p3) if p]).strip()
+        if lang == "zh":
+            parts = [p for p in result_en.split("\n\n") if p.strip()]
+            zh_parts = translate_en_to_zh(parts)
+            return "\n\n".join(zh_parts).strip()
+        return result_en
+
+    # ---------- normalize elements/materials (exterior-only) ----------
+    raw_elements  = [e for e in (card or {}).get("elements", []) if isinstance(e, str)]
+    raw_materials = [m for m in (card or {}).get("materials", []) if isinstance(m, str)]
+
+    banned_interior_noise = {
+        "interior","room","rooms","hall","halls","dining","nave","apse","altar",
+        "chapel","corridor","atrium","lobby","gallery","parliament chambers"
+    }
+    allowed_exterior = {
+        "tower","towers","pinnacle","pinnacles","tracery","buttress","buttresses",
+        "arcade","arcades","arch","arches","archway","bay","bays","pier","piers",
+        "pilaster","pilasters","capital","cornice","cornices","stringcourse","molding",
+        "keystone","voussoir","spandrel","colonnade","opening","openings",
+        "parapet","attic","balustrade","lintel","jamb","threshold",
+        "vault","vaults","barrel vaults","rib vaults","radial walls","truss","frame",
+        "elevation","facade","wall","walls","window","windows","door","doors"
+    }
+    mat_map = {
+        "roman concrete":"roman concrete","concrete":"concrete",
+        "brick":"brick","brickwork":"brick","stone":"stone","stonework":"stone",
+        "travertine":"travertine","tuff":"tuff","marble":"marble","granite":"granite",
+        "iron":"iron","steel":"steel","wood":"wood","timber":"wood","terracotta":"terracotta","clay":"terracotta",
+        "anston limestone":"anston limestone","limestone":"limestone"
+    }
+
+    elements = []
+    for e in raw_elements:
+        e2 = e.strip().lower()
+        if e2 in banned_interior_noise:
+            continue
+        if e2 in allowed_exterior:
+            elements.append(e2)
+    elements = _uniq(elements)
+
+    materials = []
+    for m in raw_materials:
+        m2 = mat_map.get(m.strip().lower())
+        if m2: materials.append(m2)
+    if "roman concrete" in materials and "concrete" in materials:
+        materials = [m for m in materials if m != "concrete"]
+    materials = _uniq(materials)
+
+    # ---------- paragraph builders (deterministic) ----------
+    def build_p1() -> str:
+        bits = []
+        if name and loc:
+            bits.append(f"{name} is in {loc}.")
+        elif loc:
+            bits.append(f"The building is in {loc}.")
+        if era:
+            bits.append(f"It was built in the {era}.")
+        # one or two short factual lines from history/intro
+        picked = []
+        for src in (history, intro):
+            for s in _sentences(src):
+                if 4 <= len(s.split()) <= 25:
+                    picked.append(s)
+            if len(picked) >= 2: break
+        bits += picked[:2]
+
+        # concise form line from massing/elements
+        m = massing.lower()
+        if any(w in m for w in ["oval","elliptic","elliptical"]):
+            bits.append("The oval form rises in layered tiers.")
+        elif any(w in m for w in ["circle","circular","rotunda"]):
+            bits.append("The circular form rises in layered tiers.")
+        elif any(w in m for w in ["long","riverfront","bays"]) or "bays" in elements:
+            bits.append("A long front steps in measured bays.")
+        elif "towers" in elements or "pinnacles" in elements:
+            bits.append("Towers and pinnacles mark the skyline.")
+        elif any(w in m for w in ["rectangular","block","massive"]):
+            bits.append("A rectangular mass rises in layered levels.")
+        elif "arches" in elements or "arcades" in elements:
+            bits.append("A ring of openings stacks in layered tiers.")
+        return _clean_text(" ".join(bits))
+
+    def build_p2() -> str:
+        bits = []
+        # composition / rhythm
+        if "arcades" in elements or "arches" in elements:
+            bits.append("Stacked arcades march around the exterior.")
+        elif "bays" in elements:
+            bits.append("Regular bays set a steady rhythm across the facade.")
+        else:
+            bits.append("Repeated openings set a steady rhythm across the facade.")
+        # structure
+        if "barrel vaults" in elements or "vaults" in elements or "rib vaults" in elements:
+            if "radial walls" in elements:
+                bits.append("Barrel vaults and radial walls carry the upper levels.")
+            else:
+                bits.append("Vaults carry the upper levels.")
+        elif structure:
+            bits.append(f"Structure is {structure}.")
+        # articulation
+        if "tracery" in elements:
+            bits.append("Window tracery gives fine vertical pattern.")
+        if "buttresses" in elements or "buttress" in elements:
+            bits.append("Buttresses brace the walls and break the mass into bays.")
+        if "engaged columns" in elements:
+            bits.append("Engaged columns articulate the openings.")
+        if "piers" in elements:
+            bits.append("Strong piers frame the openings.")
+        if "towers" in elements or "pinnacles" in elements:
+            bits.append("Towers and pinnacles punctuate the roofline.")
+        # materials
+        if materials:
+            bits.append(f"The structure was built with {_join(materials)}, showing both strength and adaptability.")
+        return _clean_text(" ".join(bits))
+
+    def build_p3() -> str:
+        # pick a feature noun for light/shadow
+        feature = "arches" if ("arches" in elements or "arcades" in elements) else ("windows" if "tracery" in elements else "openings")
+        # material texture line
+        tex = []
+        if "travertine" in materials:
+            tex.append("Travertine blocks feel smooth and pale")
+        if "anston limestone" in materials or "limestone" in materials:
+            tex.append("limestone shows crisp carving and weathering")
+        if "brick" in materials and ("roman concrete" in materials or "concrete" in materials):
+            tex.append("brick and concrete add warmth and variation")
+        elif "brick" in materials:
+            tex.append("brick adds warmth and variation")
+        elif "roman concrete" in materials or "concrete" in materials:
+            tex.append("concrete adds variation in tone")
+
+        bits = []
+        bits.append("At ground level, the surfaces reveal textures of stone and masonry.")
+        if tex:
+            bits.append(tex[0] + ".")
+        bits.append(f"Light and shadow shift across the {feature}, giving the exterior both grandeur and intimacy.")
+        # closing significance
+        if intro:
+            bits.append("Even today, the building remains a clear marker of civic life and identity.")
+        else:
+            bits.append("Even today, the building remains a clear marker of its city and public life.")
+        return _clean_text(" ".join(bits))
+
+    # ---------- assemble ----------
+    p1 = build_p1()
+    p2 = build_p2()
+    p3 = build_p3()
+
+    result_en = "\n\n".join([p for p in (p1, p2, p3) if p]).strip()
+
+    # ---------- Chinese option ----------
+    if lang == "zh":
+        parts = [p for p in result_en.split("\n\n") if p.strip()]
+        zh_parts = translate_en_to_zh(parts)
+        return "\n\n".join(zh_parts).strip()
+
+    return result_en
+
+
+#---story with database
+# @torch.inference_mode()
+# def write_story(
+#     metrics: dict,
+#     lang: str = "en",
+#     image_path: Optional[str] = None,
+#     index_npz: str = "data/index_clip.npz",
+#     match_threshold: float = 0.22,
+#     fewshot: Optional[List[Tuple[str, str]]] = None,  # optional, keeps compatibility
+#     k_examples: int = 2
+# ) -> str:
+#     """
+#     Extended, grounded architectural narrative.
+#     - If CLIP finds a match in data/buildings.jsonl, we:
+#         * switch to 4 paragraphs (longer story),
+#         * inject real facts from the card (name, location, era, style, intro, history, materials, elements),
+#         * optionally include the card's 'story' as style guidance (not copied).
+#     - No labels or meta commentary in the output.
+#     """
+#     import re
+
+#     device = str(next(t5_model.parameters()).device)
+
+#     # ---- cues from metrics (concise, non-meta) ----
+#     r  = metrics.get("facade_ratio_H_W", 1.5)
+#     v  = metrics.get("symmetry_vertical", 0.5)
+#     ry = metrics.get("rhythm_fft_peak", 1.0)
+#     fr = metrics.get("fractal_dimension", 1.4)
+#     w2w = metrics.get("window_to_wall_ratio", 0.22)
+#     cues = [
+#         ("balanced overall" if 1.1 <= r <= 1.9 else ("slender vertical feel" if r > 2.0 else "grounded horizontal feel")),
+#         ("strong symmetry" if v >= 0.65 else "relaxed symmetry"),
+#         ("clear repeating bays" if ry >= 1.2 else "soft rhythm"),
+#         ("rich ornament" if fr >= 1.55 else ("quiet detailing" if fr <= 1.25 else "measured detailing")),
+#         ("glassy frontage" if w2w >= 0.45 else ("solid masonry presence" if w2w <= 0.10 else "comfortable window pattern")),
+#     ]
+
+#     # ---- try to ground with CLIP index ----
+#     card, score = (None, 0.0)
+#     if image_path and Path(index_npz).exists():
+#         try:
+#             c, s = retrieve(image_path, index_npz, device)
+#             if c and s >= match_threshold:
+#                 card, score = c, s
+#         except Exception:
+#             card, score = None, 0.0
+
+#     # ---- build rich facts (prefer exterior + history) ----
+#     def _norm_era(e: str) -> str:
+#         if not e: return ""
+#         if "century" in e.lower() and "ad" not in e.lower():
+#             return e.strip() + " AD"
+#         return e.strip()
+
+#     def _facts_lines(c: Optional[dict]) -> str:
+#         if not c: return ""
+#         parts = []
+#         if c.get("name"):      parts.append(f"{c['name']}")
+#         if c.get("location"):  parts.append(f"in {c['location']}")
+#         if c.get("era"):       parts.append(f"built in the {_norm_era(c['era'])}")
+#         # style as context, not a label dump
+#         if c.get("style"):     parts.append(f"showing {c['style'].lower()} traits")
+#         base = ", ".join(parts) + "." if parts else ""
+
+#         extras = []
+#         if c.get("intro"):     extras.append(c["intro"])
+#         if c.get("history"):   extras.append(c["history"])
+#         if c.get("materials"): extras.append("Materials include " + ", ".join(c["materials"]) + ".")
+#         if c.get("elements"):  extras.append("Key parts include " + ", ".join(c["elements"]) + ".")
+#         return " ".join([base] + extras).strip()
+
+#     facts = _facts_lines(card)
+#     example_story = (card.get("story", "").strip() if card else "")
+#     if example_story:
+#         example_story = re.sub(r"\s+", " ", example_story)
+#         if len(example_story) > 1000:
+#             example_story = example_story[:1000].rsplit(" ", 1)[0] + " ..."
+
+#     # ---- optional few-shot (by similarity) to steer tone; not required ----
+#     fewshot_block = ""
+#     if fewshot and image_path:
+#         try:
+#             qv = embed_image(image_path, device)
+#             picked = []
+#             for ex_img, ex_story in fewshot:
+#                 try:
+#                     vv = embed_image(ex_img, device)
+#                     sim = float(np.dot(qv, vv) / (np.linalg.norm(qv) * np.linalg.norm(vv) + 1e-8))
+#                     s_clean = re.sub(r"\s+", " ", ex_story).strip()
+#                     picked.append((sim, s_clean))
+#                 except Exception:
+#                     continue
+#             picked.sort(key=lambda x: x[0], reverse=True)
+#             picked = [s for _, s in picked[:max(1, min(k_examples, len(picked)))]]
+#             if picked:
+#                 fewshot_block = "\n\n".join([f"Example:\n{p}" for p in picked]) + "\n\n"
+#         except Exception:
+#             pass
+
+#     # also include the DB story as a soft style cue (if present)
+#     if example_story:
+#         fewshot_block = (fewshot_block + f"Example (database):\n{example_story}\n\n")
+
+#     # ---- bad-words: block meta/labels and known fillers ----
+#     def _bad_words_ids(tok):
+#         ban = [
+#             "Paragraph one", "Paragraph two", "Paragraph three",
+#             "paragraph one", "paragraph two", "paragraph three",
+#             "Cues:", "Hints:", "This is a", "This text", "This passage", "This description",
+#             "It begins with a distant view", "then describes composition",
+#             "The rhythm stays even and welcoming",
+#             "Light softens edges and lifts the surface",
+#             "Small crafted touches reward a second look",
+#             "The balance feels calm and sure",
+#             "interior", "Interior",  # steer away from interior talk
+#         ]
+#         return [tok(b, add_special_tokens=False).input_ids for b in ban]
+
+#     # ---- choose length: extend when grounded ----
+#     num_paras = 4 if card else 3
+#     min_sents = 5 if card else 4
+#     max_sents = 7 if card else 6
+
+#     # ---- build prompt (no labels, exterior focus, facts woven in) ----
+#     facts_block = f"Facts to use accurately: {facts}\n\n" if facts else ""
+#     prompt = (
+#         f"{fewshot_block}"
+#         "Write a cohesive architectural narrative about the exterior of the building in the image.\n"
+#         f"Produce {num_paras} paragraphs. Each paragraph has {min_sents} to {max_sents} short sentences.\n"
+#         "Plain English, present tense, active voice. Use only commas and periods. No headings or bullets. No meta commentary.\n"
+#         "Begin with the distant view and light. Then composition, balance, symmetry, proportion, rhythm using parts such as arches, bays, columns, cornices, joints, openings. "
+#         "Include relevant historical context if known. Finish with materials, textures, crafted details, signs of age or repair, and the feeling at human scale.\n"
+#         "Do not discuss interiors. Do not fabricate names or dates.\n\n"
+#         f"{facts_block}"
+#         f"Cues: {', '.join(cues)}.\n"
+#         "Return only prose."
+#     )
+
+#     # ---- generate deterministically ----
+#     enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
+#     out = t5_model.generate(
+#         **enc,
+#         max_new_tokens=480,
+#         num_beams=8,
+#         do_sample=False,
+#         length_penalty=1.08,
+#         no_repeat_ngram_size=6,
+#         encoder_no_repeat_ngram_size=6,
+#         repetition_penalty=1.38,
+#         early_stopping=True,
+#         bad_words_ids=_bad_words_ids(t5_tok),
+#     )
+#     text = t5_tok.decode(out[0], skip_special_tokens=True).strip()
+
+#     # ---- clean and arrange into the requested number of paragraphs ----
+#     text = re.sub(r"\[[^\]]+\]", " ", text)
+#     text = re.sub(r"(?i)(cues?|hints?)\s*:.*", " ", text)
+#     text = re.sub(r"(?i)paragraph\s*(one|two|three|four)\s*:?", " ", text)
+#     text = re.sub(r"[|_—\-]{2,}", " ", text)
+#     text = re.sub(r"\s+", " ", text).strip()
+
+#     # sentence split
+#     sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip().split()) >= 3]
+#     # drop any residual banned lines verbatim
+#     banned = {
+#         "The rhythm stays even and welcoming.",
+#         "Light softens edges and lifts the surface.",
+#         "Small crafted touches reward a second look.",
+#         "The balance feels calm and sure.",
+#     }
+#     sents = [s for s in sents if s not in banned]
+#     # cap length to something sane
+#     sents = sents[: num_paras * (max_sents + 1)]
+
+#     # chunk evenly across num_paras without inventing filler
+#     if not sents:
+#         result_en = ""
+#     else:
+#         approx = max(min_sents, min(max_sents, len(sents) // num_paras or min_sents))
+#         paras = []
+#         i = 0
+#         for p in range(num_paras - 1):
+#             j = min(len(sents), i + approx)
+#             paras.append(" ".join(sents[i:j]).strip()); i = j
+#         paras.append(" ".join(sents[i:]).strip())
+#         result_en = "\n\n".join([p for p in paras if p]).strip()
+
+#     if lang == "zh":
+#         parts = [p.strip() for p in result_en.split("\n\n") if p.strip()]
+#         zh_parts = translate_en_to_zh(parts)
+#         return "\n\n".join(zh_parts).strip()
+
+#     return result_en
+
+#story general 
+# @torch.inference_mode()
+# def write_story(metrics: dict, lang: str = "en") -> str:
+#     # Build human hints from metrics
 #     r  = metrics.get("facade_ratio_H_W", 1.5)
 #     v  = metrics.get("symmetry_vertical", 0.5)
 #     ry = metrics.get("rhythm_fft_peak", 1.0)
@@ -596,71 +1156,53 @@ def write_story(metrics: dict, lang: str = "en") -> str:
 #     elif w2w <= 0.10: hints.append("solid masonry presence")
 #     else: hints.append("comfortable window pattern")
 
-    
-#     example_hints = "balanced overall, strong symmetry, clear repeating bays, comfortable window pattern"
-#     example = (
-#         "You are an architecture narrator for everyday readers.\n"
-#         "Write in **English**, EXACTLY three paragraphs, each **4–6 sentences**. Use present tense, simple language.\n"
-#         "Do not use style labels. No numbers or dates.\n"
-#         "Focus on what the eye notices: balance, symmetry, rhythm, light, craft, human scale.\n"
-#         "Use the tag format exactly as shown.\n"
-#         f"Hints: {example_hints}\n"
-#         "[P1] The facade meets the street with calm order. Openings line up from left to right. "
-#         "A clear middle bay frames the entry. Sun picks out the frames and sills. "
-#         "Materials look steady, well placed, and inviting. [/P1]\n"
-#         "[P2] Up close, windows repeat with even spacing. Vertical strips read like quiet supports. "
-#         "Shadow lines at the reveals add depth. A simple band marks the roof edge. "
-#         "Corners stay crisp and patient. [/P2]\n"
-#         "[P3] Craft shows in the small touches. Joints sit tight and true. "
-#         "Handles and railings meet the hand without fuss. Evening light warms the surface and softens the edges. "
-#         "The building feels welcoming and sure. [/P3]\n"
-#         "\n"
-#         "Now write the next description using the same format and tags only.\n"
-#         f"Hints: {', '.join(hints)}\n"
-#         "[P1]"
-#    )
-#     bad_ids = BAD_WORD_IDS_EN
-
-#     inputs = t5_tok(example, return_tensors="pt").to(device)
-#     out = t5_model.generate(
-#         **inputs,
-#         max_new_tokens=420,
-#         min_new_tokens=260,
-#         do_sample=True,
-#         temperature=0.85 if language=="zh" else 0.8,
-#         top_p=0.92,
-#         top_k=60,
-#         repetition_penalty=1.12,
-#         no_repeat_ngram_size=4,
-#         bad_words_ids=bad_ids
+#     # prompt = (
+#     #     "You are an architecture narrator.\n"
+#     #     "Write EXACTLY three paragraphs, each 4 to 6 short sentences.\n"
+#     #     "Keep language simple. No style labels. No numbers. No bullet points.\n"
+#     #     "Focus on balance, symmetry, rhythm, light, and crafted details.\n"
+#     #     "Describe what the eye notices first, then what rewards a closer look.\n"
+#     #     f"Hints: {', '.join(hints)}\n"
+#     #     "Return only prose paragraphs separated by a blank line."
+#     # )
+#     prompt = (
+#     "Write exactly three paragraphs of 4–6 short sentences each.\n"
+#     "Plain English, present tense, active voice. Use only commas and periods.\n"
+#     "No headings, lists, or commentary about writing, readers, or process.\n"
+#     "Never use these words: article, analysis, study, survey, review, guide, overview, tutorial, introduction, conclusion, paragraph, page, section, passage, purpose, function, story, post.\n\n"
+#     f"Cues: {', '.join(hints)}.\n\n"
+#     "Paragraph one: distant view and light.\n"
+#     "Paragraph two: composition with balance, symmetry, proportion, rhythm using parts such as arches, bays, columns, cornices, joints, openings, and include style and era if known.\n"
+#     "Paragraph three: materials, craft, textures, signs of age or repair, and close human-scale feel.\n"
+#     "Return only the three paragraphs separated by one blank line."
 #     )
-#     raw = t5_tok.decode(out[0], skip_special_tokens=True).strip()
 
-#     # --- sanitize to exactly three paragraphs ---
-#     def clean(text: str) -> str:
-#         text = re.sub(r"\[[^\]]+\]", " ", text)   # remove any leftover [tags]
-#         text = re.sub(r"[|_—\-]{2,}", " ", text)  # remove junk separators
-#         text = re.sub(r"(?i)\b(now write.*|write exactly.*|hints:.*)\b", " ", text)
-#         text = re.sub(r"\s+", " ", text).strip()
-#         return text
 
-#     txt = clean(raw)
-#     sents = re.split(r'(?<=[。！？.!?])\s+', txt)
-#     sents = [s.strip() for s in sents if len(s.strip().split()) > 2]
-#     while len(sents) < 12:  # ensure content
-#         txt += " The rhythm stays even and welcoming." if language=="en" else " 节奏平稳而友好。"
-#         sents = re.split(r'(?<=[。！？.!?])\s+', clean(txt))
+#     enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
+#     gen_kwargs = dict(
+#         max_new_tokens=320,
+#         min_new_tokens=220,           # encourage 3 paras
+#         do_sample=True,
+#         temperature=0.7,
+#         top_p=0.9,
+#         no_repeat_ngram_size=3,
+#         repetition_penalty=1.12,
+#     )
+#     # (optional) bad words list if you defined BAD_WORD_IDS_EN elsewhere
+#     bad_ids = globals().get("BAD_WORD_IDS_EN")
+#     if bad_ids is not None:
+#         gen_kwargs["bad_words_ids"] = bad_ids
 
-#     per = 5
-#     p1 = " ".join(sents[0:per])
-#     p2 = " ".join(sents[per:2*per])
-#     p3_src = " ".join(sents[2*per:3*per])
-#     if not p3_src:
-#         p3_src = ("The scene settles with easy balance. Light and shade trade places through the day. "
-#                   "Small crafted touches reward a second look. It feels made for people, not for show."
-#                   if language=="en" else
-#                   "画面以从容的均衡收束。光与影在一天里交替。小小的手工细节值得回望。它是为人而做，而不是为炫耀。")
-#     return "\n\n".join([p1, p2, p3_src]).strip()
+#     out = t5_model.generate(**enc, **gen_kwargs)
+#     text_en = t5_tok.decode(out[0], skip_special_tokens=True).strip()
+
+#     # enforce 3 paragraphs
+#     paras_en = _group_into_three_paragraphs(text_en)
+
+#     if lang == "zh":
+#         paras_zh = translate_en_to_zh(paras_en)
+#         return _join_paragraphs(paras_zh)
+#     return _join_paragraphs(paras_en)
 
 # ---------------- Ranking ----------------
 def update_and_rank(score, name, hist_path=HIST_PATH):
@@ -678,17 +1220,27 @@ def update_and_rank(score, name, hist_path=HIST_PATH):
     except Exception:
         pass
     return rank, N, percentile
-
 # ---------------- PDF ----------------
-def make_report(orig_img, overlay_img, heat_img, viz_img, metrics, ranking, story_text, lang: str = "en"):
-    import io, re
+def make_report(
+    orig_img,
+    overlay_img,
+    heat_img,
+    viz_img,
+    metrics,
+    ranking,
+    story_text,
+    lang: str = "en",
+    interiors: Optional[list] = None,   # <-- NEW
+):
+    import io, re, time as _t
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from PIL import Image
 
-    # --- ensure CJK font is available (no local files required) ---
+    # ensure CJK font available
     try:
         pdfmetrics.getFont("STSong-Light")
     except KeyError:
@@ -697,160 +1249,218 @@ def make_report(orig_img, overlay_img, heat_img, viz_img, metrics, ranking, stor
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     W, H = A4
-    TOP, BOT, LM, RM = 40, 60, 40, 40
+    TOP, BOT, LM, RM = 40, 50, 40, 40
     y = H - TOP
-    COL_W = (W - LM - RM - 20) / 3.0   # three columns + 10pt gutters
 
-    # ---------- header (static title) ----------
-    c.setFont("STSong-Light", 16)
-    c.drawString(LM, y, "AI Analysis of Historic Architecture / 历史建筑的人工智能分析")
-    y -= 24
-    c.setFont("STSong-Light", 10)
-    import time as _t
-    c.drawString(LM, y, _t.strftime("Generated on / 生成于 %Y-%m-%d %H:%M:%S"))
-    y -= 12
-
-    # ---------- helpers ----------
-    def draw_img_bottom(pil, x, y_bottom, maxw_pt):
+    def draw_img_fit_top(pil, x_left, y_top, max_w):
         if pil is None:
             return 0.0
-        w_px, h_px = pil.size
-        if w_px <= 0:
+        try:
+            w_px, h_px = pil.size
+        except Exception:
             return 0.0
-        target_w = float(maxw_pt)
-        target_h = target_w * (h_px / float(w_px))
-        c.drawImage(ImageReader(pil), x, y_bottom, width=target_w, height=target_h,
+        if w_px <= 0 or h_px <= 0:
+            return 0.0
+        w = float(max_w)
+        h = w * (h_px / float(w_px))
+        c.drawImage(ImageReader(pil), x_left, y_top - h, width=w, height=h,
                     preserveAspectRatio=True, mask='auto')
-        return target_h
+        return h
 
-    def draw_img_top(pil, x, y_top, maxw_pt):
-        if pil is None:
-            return 0.0
-        w_px, h_px = pil.size
-        if w_px <= 0:
-            return 0.0
-        target_w = float(maxw_pt)
-        target_h = target_w * (h_px / float(w_px))
-        c.drawImage(ImageReader(pil), x, y_top - target_h, width=target_w, height=target_h,
-                    preserveAspectRatio=True, mask='auto')
-        return target_h
-
-    # robust wrap: English by words, Chinese by characters
     def wrap_lines(text, max_width_pt, font_name, font_size, is_cjk=False):
         sw = pdfmetrics.stringWidth
         lines = []
         if is_cjk:
             cur = ""
-            for ch in text:
+            for ch in text or "":
                 if ch == "\n":
-                    lines.append(cur); cur = ""; continue
-                w = sw(cur + ch, font_name, font_size)
-                if w <= max_width_pt:
+                    if cur: lines.append(cur)
+                    cur = ""
+                    continue
+                if sw(cur + ch, font_name, font_size) <= max_width_pt:
                     cur += ch
                 else:
-                    if cur:
-                        lines.append(cur)
+                    if cur: lines.append(cur)
                     cur = ch
-            if cur:
-                lines.append(cur)
+            if cur: lines.append(cur)
             return lines
         else:
-            words = re.split(r"\s+", text.strip())
+            words = re.split(r"\s+", (text or "").strip())
             cur = ""
             for w in words:
                 add = (w if not cur else " " + w)
                 if sw(cur + add, font_name, font_size) <= max_width_pt:
                     cur += add
                 else:
-                    if cur:
-                        lines.append(cur)
+                    if cur: lines.append(cur)
                     cur = w
-            if cur:
-                lines.append(cur)
+            if cur: lines.append(cur)
             return lines
 
-    def sanitize_story_text(t: str) -> str:
-        t = re.sub(r"\[[^\]]+\]", " ", t)               # remove stray [tags]
-        t = re.sub(r"(Now write.*|Hints:.*)$", " ", t, flags=re.I | re.M)
-        t = re.sub(r"[|_—\-]{2,}", " ", t)              # junk separators
-        t = re.sub(r"[ \t]+", " ", t)
-        t = re.sub(r"(\s*\n\s*){3,}", "\n\n", t)
-        return t.strip()
+    def clean_story(t: str) -> str:
+        t = re.sub(r"\[[^\]]+\]", " ", t)
+        t = re.sub(r"[|_—\-]{2,}", " ", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        parts = [p.strip() for p in re.split(r'\n\s*\n', t) if p.strip()]
+        if not parts:
+            sents = re.split(r'(?<=[.!?])\s+', t)
+            sents = [s.strip() for s in sents if len(s.strip().split()) >= 3]
+            per = max(4, min(6, (len(sents) // 3) or 4))
+            parts = [' '.join(sents[i:i+per]) for i in range(0, len(sents), per)]
+        return "\n\n".join(parts[:6])
 
-    # ---------- Row 1: three images ----------
-    row1_bottom = y - 200  # anchor the bottom of the image row
-    h1 = draw_img_bottom(orig_img, LM,                     row1_bottom, COL_W)
-    h2 = draw_img_bottom(overlay_img, LM + COL_W + 10,    row1_bottom, COL_W)
-    h3 = draw_img_bottom(heat_img,    LM + 2*(COL_W + 10),row1_bottom, COL_W)
-    tallest = max(h1, h2, h3)
+    def elide(text: str, max_w: float, font_name: str, font_size: int) -> str:
+        """Single-line ellipsis to fit width."""
+        sw = pdfmetrics.stringWidth
+        if sw(text, font_name, font_size) <= max_w:
+            return text
+        ell = "…"
+        out = ""
+        for ch in text:
+            if sw(out + ch + ell, font_name, font_size) <= max_w:
+                out += ch
+            else:
+                break
+        return out + ell
 
-    # move cursor safely below images
-    y = row1_bottom - tallest - 18
-    if y < BOT + 40:
-        c.showPage()
-        y = H - TOP
-
-    # ---------- Story block ----------
-    c.setFont("STSong-Light", 12)
-    c.drawString(LM, y, "Design Narrative / 设计叙事")   
+    # Header
+    c.setFont("STSong-Light", 16)
+    c.drawString(LM, y, "AI Analysis of Historic Architecture / 历史建筑的人工智能分析")
+    y -= 22
+    c.setFont("STSong-Light", 10)
+    c.drawString(LM, y, _t.strftime("Generated on / 生成于 %Y-%m-%d %H:%M:%S"))
     y -= 16
 
+    # Row of three images (original, overlay, heat)
+    COL_W = (W - LM - RM - 20) / 3.0
+    row_top = y
+    h1 = draw_img_fit_top(orig_img, LM, row_top, COL_W)
+    h2 = draw_img_fit_top(overlay_img, LM + COL_W + 10, row_top, COL_W)
+    h3 = draw_img_fit_top(heat_img, LM + 2*(COL_W + 10), row_top, COL_W)
+    y = row_top - max(h1, h2, h3) - 14
+
+    # Story block
+    if y < BOT + 140:
+        c.showPage(); y = H - TOP
+    c.setFont("STSong-Light", 12)
+    c.drawString(LM, y, "Design Narrative / 设计叙事")
+    y -= 14
     body_font = "STSong-Light" if lang == "zh" else "Helvetica"
-    font_size = 11 if lang == "zh" else 10
-    leading   = 14 if lang == "zh" else 12
+    font_size = 10 if lang == "en" else 11
+    leading = 13 if lang == "en" else 14
     c.setFont(body_font, font_size)
-    col_width = W - LM - RM - 8
 
-    clean_story = sanitize_story_text(story_text)
-    paragraphs = [p.strip() for p in clean_story.split("\n\n") if p.strip()]
-
+    story_clean = clean_story(story_text or "")
+    paragraphs = [p.strip() for p in story_clean.split("\n\n") if p.strip()]
+    max_w = W - LM - RM
     for para in paragraphs:
-        lines = wrap_lines(para, col_width, body_font, font_size, is_cjk=(lang == "zh"))
-        for ln in lines:
+        for ln in wrap_lines(para, max_w, body_font, font_size, is_cjk=(lang=="zh")):
             if y < BOT:
-                c.showPage()
-                y = H - TOP
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(LM, y, "Story (cont.)")
-                y -= 16
+                c.showPage(); y = H - TOP
                 c.setFont(body_font, font_size)
-            c.drawString(LM + 8, y, ln)
+            c.drawString(LM, y, ln)
             y -= leading
-        y -= leading // 2  # small gap between paragraphs
+        y -= int(leading * 0.5)
 
-    # ---------- Page 2: Visualization + Ranking ----------
+    # -------- Interior Views (NEW) --------
+    if interiors:
+        # new page if not enough room for a grid row
+        if y < BOT + 160:
+            c.showPage(); y = H - TOP
+
+        c.setFont("STSong-Light", 12)
+        c.drawString(LM, y, "Interior Views / 室内影像")
+        y -= 10
+
+        cols = 3
+        gutter = 10.0
+        cell_w = (W - LM - RM - gutter * (cols - 1)) / cols
+        caption_font = "STSong-Light"
+        caption_size = 9
+        c.setFont(caption_font, caption_size)
+
+        col_i = 0
+        row_max_h = 0.0
+        x = LM
+
+        for item in interiors:
+            path = (item or {}).get("image")
+            cap  = (item or {}).get("caption", "Interior view")
+
+            # load safely
+            try:
+                im = Image.open(path).convert("RGB")
+            except Exception:
+                # skip unreadable images
+                continue
+
+            # ensure space for image + caption; if not, new row / page
+            min_cell_h = cell_w * 0.6 + 18  # conservative estimate
+            if y - min_cell_h < BOT:
+                # flush remaining columns as a new page row
+                c.showPage(); y = H - TOP
+                c.setFont("STSong-Light", 12)
+                c.drawString(LM, y, "Interior Views / 室内影像")
+                y -= 10
+                c.setFont(caption_font, caption_size)
+                x = LM
+                col_i = 0
+                row_max_h = 0.0
+
+            # draw image
+            img_h = draw_img_fit_top(im, x, y, cell_w)
+
+            # draw caption (single line, ellipsized)
+            cap_y = y - img_h - 11
+            c.setFont(caption_font, caption_size)
+            c.drawString(x, cap_y, elide(cap, cell_w, caption_font, caption_size))
+
+            # track row height
+            used_h = img_h + 18  # image + space + caption
+            row_max_h = max(row_max_h, used_h)
+
+            # move to next column or wrap to next row
+            col_i += 1
+            if col_i < cols:
+                x += cell_w + gutter
+            else:
+                # next row
+                y = y - row_max_h - 12
+                x = LM
+                col_i = 0
+                row_max_h = 0.0
+
+        # if last row not closed, move y below it so later content won't overlap
+        if col_i != 0:
+            y = y - row_max_h - 12
+
+    # Viz page
     c.showPage()
     y = H - TOP
-
     c.setFont("STSong-Light", 12)
     c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
-    y -= 12
-
-    y_top_for_viz = y - 8
-    _ = draw_img_top(viz_img, LM, y_top_for_viz, W - LM - RM)
-
+    y -= 8
     if viz_img is not None:
+        _ = draw_img_fit_top(viz_img, LM, y, W - LM - RM)
         w_px, h_px = viz_img.size
-        viz_h = (W - LM - RM) * (h_px / float(w_px))
-    else:
-        viz_h = 0.0
-    y = (y_top_for_viz - viz_h) - 18
+        y -= (W - LM - RM) * (h_px / float(w_px)) + 16
 
-    if y < BOT + 40:
-        c.showPage(); y = H - TOP
+    # Ranking + metrics
+    c.setFont("Helvetica", 11)
+    try:
+        rank, N, perc = ranking
+        c.drawString(LM, y, f"Comparative ranking: {rank} / {N}  (~{perc:.1f}th percentile)")
+        y -= 16
+    except Exception:
+        pass
 
-    c.setFont("STSong-Light", 12)
-    c.drawString(LM, y, "Ranking / 排行")
-    y -= 14
     c.setFont("Helvetica", 10)
-    c.drawString(
-        LM + 8, y,
-        "Comparative ranking: {} / {}  (~{:.1f}th percentile)".format(
-            ranking[0], ranking[1], ranking[2]
-        )
-    )
+    for k, v in (metrics or {}).items():
+        if y < BOT:
+            c.showPage(); y = H - TOP; c.setFont("Helvetica", 10)
+        c.drawString(LM, y, f"{k}: {v}")
+        y -= 12
 
-    # ---------- finish ----------
     c.showPage()
     c.save()
     pdf_bytes = buf.getvalue()
@@ -899,10 +1509,35 @@ if uploaded:
             "fractal_dimension": round(fractal, 3),
             "aesthetic_proxy": round(clip_score, 2)
         }
-        with st.spinner("Writing the story..."):
+        
+        # Save current upload for CLIP retrieval
+        tmp_image_path = str(Path("outputs") / f"_tmp_{Path(up.name).stem}.png")
+        pil.save(tmp_image_path)
 
-            story = write_story(metrics_dict, lang=LANG)
-            story = sanitize_story_text(story)
+        with st.spinner("Writing the story..."):
+            story = write_story(
+                metrics_dict,
+                lang=LANG,
+                image_path=tmp_image_path,
+            )
+        story = sanitize_story_text(story)
+
+        # try to retrieve the same card your writer used
+        matched_card = None
+        try:
+            c, s = retrieve(tmp_image_path, "data/index_clip.npz", device)
+            if c and s >= 0.22:
+                matched_card = c
+        except Exception:
+            pass
+
+        st.markdown("### Design Narrative / 設計敘事")
+        st.write(story)
+
+        if matched_card and matched_card.get("interiors"):
+            show_interior_gallery(matched_card)
+
+
         # with st.spinner("Writing the story..."):
         #     story = write_story(metrics_dict)
 
@@ -911,8 +1546,8 @@ if uploaded:
         show_img(col2, overlay, "Semantic overlay (heuristic)")
         show_img(col3, heat, "Explainability heatmap")
 
-        st.markdown("### Design Narrative / 設計敘事")
-        st.write(story)
+        # st.markdown("### Design Narrative / 設計敘事")
+        # st.write(story)
 
         from collections import Counter
         label_counts = Counter([d["label"] for d in dets])
@@ -920,7 +1555,7 @@ if uploaded:
 
         st.markdown("### Aesthetic Visualization / 美學視覺化")
         try:
-            st.image(viz_img, caption="Feature profile and score makeup", use_container_width=True)
+            st.image(viz_img, caption="Feature profile and score makeup", width="stretch")
         except TypeError:
             st.image(viz_img, caption="Feature profile and score makeup", use_column_width=True)
 
@@ -934,13 +1569,27 @@ if uploaded:
             metrics=metrics_dict,
             ranking=(rank, N, perc),
             story_text=story,
-            lang=LANG 
-        )
+            lang=LANG,
+            interiors=(matched_card.get("interiors") if matched_card else None)
+            )
+        if not isinstance(pdf_bytes, (bytes, bytearray)):
+            st.error("PDF generation failed. No binary data returned.")            
+        else:
+            st.download_button(
+                label="Download report PDF / 下載報告 PDF",
+                data=pdf_bytes,
+                file_name=Path(up.name).stem + "_report.pdf",
+                mime="application/pdf",
+                key=f"dl-{Path(up.name).stem}"
+            )
+
+            
+
    
-        st.download_button(
-            label="Download report PDF / 下載報告 PDF",
-            data=pdf_bytes,
-            file_name=Path(up.name).stem + "_report.pdf",
-            mime="application/pdf",
-            key="dl-{}".format(Path(up.name).stem)
-        )
+        # st.download_button(
+        #     label="Download report PDF / 下載報告 PDF",
+        #     data=pdf_bytes,
+        #     file_name=Path(up.name).stem + "_report.pdf",
+        #     mime="application/pdf",
+        #     key="dl-{}".format(Path(up.name).stem)
+        # )
