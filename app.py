@@ -49,8 +49,8 @@ CLIP_MODEL_ID = "openai/clip-vit-base-patch32"  # image encoder
 TRANS_MODEL_ID = "Helsinki-NLP/opus-mt-en-zh" 
 
 # ---------------- Streamlit UI ----------------
-st.set_page_config(page_title="AI Analysis of Historic Architecture", layout="wide")
-st.title("AI Analysis of Historic Architecture / 歷史建築的人工智慧分析")
+st.set_page_config(page_title="AI Analysis of Taichung Historic Architecture", layout="wide")
+st.title("AI Analysis of Taichung Historic Architecture / 台中历史建筑的人工智能分析")
 st.title('')
 
 
@@ -213,7 +213,7 @@ def show_interior_gallery(card: dict):
         try:
             img = Image.open(path).convert("RGB")
             with cols[i % 3]:
-                st.image(img, caption=cap, use_container_width=True)
+                st.image(img, caption=cap, width='stretch')
         except Exception as e:
             st.warning(f"Could not load interior image: {path} ({e})")
 
@@ -229,7 +229,7 @@ def show_img(col_like, img, caption):
             (col_like if hasattr(col_like, "warning") else st).warning(f"Could not render: {caption}")
             return
     try:
-        col_like.image(img, caption=caption, use_container_width=True)
+        col_like.image(img, caption=caption, width='stretch')
     except TypeError:
         col_like.image(img, caption=caption, use_column_width=True)
 
@@ -649,47 +649,58 @@ def get_gen_kwargs(t5_tok):
         early_stopping=True,
         bad_words_ids=build_bad_words(t5_tok),
     )
+#-- give answer 
+# ---------- LLM Q&A using `info` as grounding ----------
+@torch.inference_mode()
+def guide_answer_from_info(question: str, info_text: str, LANG: str) -> str:
+    """
+    Use FLAN-T5 to answer conversationally, but ONLY from the given info_text.
+    If not found, return a polite apology.
+    """
+    if not question or not info_text:
+        return "NOTFOUND"
 
+    # Instruction in English and Chinese
+    inst_en = (
+        "You are a knowledgeable guide for historic architecture. "
+        "Answer the visitor's question in details using the following Information. "
+        "Modify the information and make it intersting for user."
+        "If the answer is not in the Information, reply exactly with: NOTFOUND.\n\n"
+        f"Information:\n{info_text}\n\n"
+        f"Question: {question}\nAnswer:"
+    )
+    inst_zh = (
+        "你是历史建筑的导览员。请只根据以下信息回答游客的问题。"
+        "如果答案不在信息中，请只回复：NOTFOUND。\n\n"
+        f"信息：\n{info_text}\n\n"
+        f"问题：{question}\n答案："
+    )
+    prompt = inst_zh if LANG == "zh" else inst_en
+
+    enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
+    out = t5_model.generate(
+        **enc,
+        max_new_tokens=5000,
+        min_new_tokens=30,
+        num_beams=6,
+        do_sample=False,
+        length_penalty=1.0,
+        no_repeat_ngram_size=4,
+        encoder_no_repeat_ngram_size=4,
+        early_stopping=True,
+    )
+    ans = t5_tok.decode(out[0], skip_special_tokens=True).strip()
+
+    if ans.upper().startswith("NOTFOUND"):
+        return "NOTFOUND"
+    return ans
+# -------- Language helper --------
+def _lang_text(en: str, zh: str, LANG: str) -> str:
+    """Return English or Chinese text based on LANG flag."""
+    return zh if LANG == "zh" else en
 
 # ---------- 2) writer (simple and grounded if image matches) ----------
 
-
-# @torch.inference_mode()
-# def write_story(metrics: dict,
-#                 lang: str = "en",
-#                 image_path: str | None = None,
-#                 index_npz: str = "data/index_clip.npz",
-#                 match_threshold: float = 0.22) -> str:
-
-#     hints  = build_hints(metrics)
-#     device = str(next(t5_model.parameters()).device)
-
-#     # try to ground using your CLIP index
-#     card = None
-#     if image_path and Path(index_npz).exists():
-#         try:
-#             c, score = retrieve(image_path, index_npz, device)  # your CLIP retrieve()
-#             if c and score >= match_threshold:
-#                 card = c
-#         except Exception:
-#             card = None
-
-#     facts  = build_facts_line(card)
-#     prompt = make_prompt_simple(facts, hints)
-
-#     enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
-#     out = t5_model.generate(**enc, **get_gen_kwargs(t5_tok))
-#     text = t5_tok.decode(out[0], skip_special_tokens=True).strip()
-
-#     # enforce exactly three paragraphs
-#     parts = [p.strip() for p in text.split("\n\n") if p.strip()]
-#     if len(parts) > 3: parts = parts[:3]
-#     while len(parts) < 3: parts.append("")
-#     text = "\n\n".join(parts)
-
-#     if lang == "zh" and "translate_en_to_zh" in globals():
-#         return _join_paragraphs(translate_en_to_zh(text.split("\n\n")))
-#     return text
 
 @torch.inference_mode()
 def write_story(
@@ -1086,6 +1097,7 @@ def write_story(
 #     out = t5_model.generate(
 #         **enc,
 #         max_new_tokens=480,
+          
 #         num_beams=8,
 #         do_sample=False,
 #         length_penalty=1.08,
@@ -1325,7 +1337,7 @@ def make_report(
 
     # Header
     c.setFont("STSong-Light", 16)
-    c.drawString(LM, y, "AI Analysis of Historic Architecture / 历史建筑的人工智能分析")
+    c.drawString(LM, y, "AI Analysis of Taichung Historic Architecture / 台中历史建筑的人工智能分析")
     y -= 22
     c.setFont("STSong-Light", 10)
     c.drawString(LM, y, _t.strftime("Generated on / 生成于 %Y-%m-%d %H:%M:%S"))
@@ -1533,7 +1545,27 @@ if uploaded:
 
         st.markdown("### Design Narrative / 設計敘事")
         st.write(story)
+        
+        #----question anser ui
+        # ---------- Ask (LLM guide using `info`) ----------
+        st.markdown("### Ask / 问")
+        qa_key = f"qa-{Path(up.name).stem}"
+        user_q = st.text_input(_lang_text("Ask a question about this building",
+                                          "请就此建筑提问",LANG),
+                               key=qa_key)
 
+        if user_q:
+            info_text = (matched_card or {}).get("info", "")
+            ans = guide_answer_from_info(user_q, info_text, LANG)
+            if ans == "NOTFOUND":
+                st.warning(_lang_text(
+                    "Sorry, I can’t find that in the current building information.",
+                    "抱歉，我在当前建筑信息中找不到这个答案。",LANG
+                ))
+            else:
+                st.success(ans)
+
+        #---interiour designs 
         if matched_card and matched_card.get("interiors"):
             show_interior_gallery(matched_card)
 
