@@ -662,9 +662,8 @@ def guide_answer_from_info(question: str, info_text: str, LANG: str) -> str:
 
     # Instruction in English and Chinese
     inst_en = (
-        "You are a knowledgeable guide for historic architecture. "
-        "Answer the visitor's question in details using the following Information. "
-        "Modify the information and make it intersting for user."
+        "You are a knowledgeable guide for historic architecture."
+        "First you have to understand the question and give answer using the Information."
         "If the answer is not in the Information, reply exactly with: NOTFOUND.\n\n"
         f"Information:\n{info_text}\n\n"
         f"Question: {question}\nAnswer:"
@@ -681,19 +680,20 @@ def guide_answer_from_info(question: str, info_text: str, LANG: str) -> str:
     out = t5_model.generate(
         **enc,
         max_new_tokens=5000,
-        min_new_tokens=30,
-        num_beams=6,
+        min_new_tokens=50,
+        num_beams=5,
         do_sample=False,
-        length_penalty=1.0,
-        no_repeat_ngram_size=4,
-        encoder_no_repeat_ngram_size=4,
-        early_stopping=True,
+        length_penalty=1.05,
+        no_repeat_ngram_size=3,
+        encoder_no_repeat_ngram_size=0,
+        early_stopping=False,
     )
     ans = t5_tok.decode(out[0], skip_special_tokens=True).strip()
 
     if ans.upper().startswith("NOTFOUND"):
         return "NOTFOUND"
     return ans
+
 # -------- Language helper --------
 def _lang_text(en: str, zh: str, LANG: str) -> str:
     """Return English or Chinese text based on LANG flag."""
@@ -954,267 +954,6 @@ def write_story(
     return result_en
 
 
-#---story with database
-# @torch.inference_mode()
-# def write_story(
-#     metrics: dict,
-#     lang: str = "en",
-#     image_path: Optional[str] = None,
-#     index_npz: str = "data/index_clip.npz",
-#     match_threshold: float = 0.22,
-#     fewshot: Optional[List[Tuple[str, str]]] = None,  # optional, keeps compatibility
-#     k_examples: int = 2
-# ) -> str:
-#     """
-#     Extended, grounded architectural narrative.
-#     - If CLIP finds a match in data/buildings.jsonl, we:
-#         * switch to 4 paragraphs (longer story),
-#         * inject real facts from the card (name, location, era, style, intro, history, materials, elements),
-#         * optionally include the card's 'story' as style guidance (not copied).
-#     - No labels or meta commentary in the output.
-#     """
-#     import re
-
-#     device = str(next(t5_model.parameters()).device)
-
-#     # ---- cues from metrics (concise, non-meta) ----
-#     r  = metrics.get("facade_ratio_H_W", 1.5)
-#     v  = metrics.get("symmetry_vertical", 0.5)
-#     ry = metrics.get("rhythm_fft_peak", 1.0)
-#     fr = metrics.get("fractal_dimension", 1.4)
-#     w2w = metrics.get("window_to_wall_ratio", 0.22)
-#     cues = [
-#         ("balanced overall" if 1.1 <= r <= 1.9 else ("slender vertical feel" if r > 2.0 else "grounded horizontal feel")),
-#         ("strong symmetry" if v >= 0.65 else "relaxed symmetry"),
-#         ("clear repeating bays" if ry >= 1.2 else "soft rhythm"),
-#         ("rich ornament" if fr >= 1.55 else ("quiet detailing" if fr <= 1.25 else "measured detailing")),
-#         ("glassy frontage" if w2w >= 0.45 else ("solid masonry presence" if w2w <= 0.10 else "comfortable window pattern")),
-#     ]
-
-#     # ---- try to ground with CLIP index ----
-#     card, score = (None, 0.0)
-#     if image_path and Path(index_npz).exists():
-#         try:
-#             c, s = retrieve(image_path, index_npz, device)
-#             if c and s >= match_threshold:
-#                 card, score = c, s
-#         except Exception:
-#             card, score = None, 0.0
-
-#     # ---- build rich facts (prefer exterior + history) ----
-#     def _norm_era(e: str) -> str:
-#         if not e: return ""
-#         if "century" in e.lower() and "ad" not in e.lower():
-#             return e.strip() + " AD"
-#         return e.strip()
-
-#     def _facts_lines(c: Optional[dict]) -> str:
-#         if not c: return ""
-#         parts = []
-#         if c.get("name"):      parts.append(f"{c['name']}")
-#         if c.get("location"):  parts.append(f"in {c['location']}")
-#         if c.get("era"):       parts.append(f"built in the {_norm_era(c['era'])}")
-#         # style as context, not a label dump
-#         if c.get("style"):     parts.append(f"showing {c['style'].lower()} traits")
-#         base = ", ".join(parts) + "." if parts else ""
-
-#         extras = []
-#         if c.get("intro"):     extras.append(c["intro"])
-#         if c.get("history"):   extras.append(c["history"])
-#         if c.get("materials"): extras.append("Materials include " + ", ".join(c["materials"]) + ".")
-#         if c.get("elements"):  extras.append("Key parts include " + ", ".join(c["elements"]) + ".")
-#         return " ".join([base] + extras).strip()
-
-#     facts = _facts_lines(card)
-#     example_story = (card.get("story", "").strip() if card else "")
-#     if example_story:
-#         example_story = re.sub(r"\s+", " ", example_story)
-#         if len(example_story) > 1000:
-#             example_story = example_story[:1000].rsplit(" ", 1)[0] + " ..."
-
-#     # ---- optional few-shot (by similarity) to steer tone; not required ----
-#     fewshot_block = ""
-#     if fewshot and image_path:
-#         try:
-#             qv = embed_image(image_path, device)
-#             picked = []
-#             for ex_img, ex_story in fewshot:
-#                 try:
-#                     vv = embed_image(ex_img, device)
-#                     sim = float(np.dot(qv, vv) / (np.linalg.norm(qv) * np.linalg.norm(vv) + 1e-8))
-#                     s_clean = re.sub(r"\s+", " ", ex_story).strip()
-#                     picked.append((sim, s_clean))
-#                 except Exception:
-#                     continue
-#             picked.sort(key=lambda x: x[0], reverse=True)
-#             picked = [s for _, s in picked[:max(1, min(k_examples, len(picked)))]]
-#             if picked:
-#                 fewshot_block = "\n\n".join([f"Example:\n{p}" for p in picked]) + "\n\n"
-#         except Exception:
-#             pass
-
-#     # also include the DB story as a soft style cue (if present)
-#     if example_story:
-#         fewshot_block = (fewshot_block + f"Example (database):\n{example_story}\n\n")
-
-#     # ---- bad-words: block meta/labels and known fillers ----
-#     def _bad_words_ids(tok):
-#         ban = [
-#             "Paragraph one", "Paragraph two", "Paragraph three",
-#             "paragraph one", "paragraph two", "paragraph three",
-#             "Cues:", "Hints:", "This is a", "This text", "This passage", "This description",
-#             "It begins with a distant view", "then describes composition",
-#             "The rhythm stays even and welcoming",
-#             "Light softens edges and lifts the surface",
-#             "Small crafted touches reward a second look",
-#             "The balance feels calm and sure",
-#             "interior", "Interior",  # steer away from interior talk
-#         ]
-#         return [tok(b, add_special_tokens=False).input_ids for b in ban]
-
-#     # ---- choose length: extend when grounded ----
-#     num_paras = 4 if card else 3
-#     min_sents = 5 if card else 4
-#     max_sents = 7 if card else 6
-
-#     # ---- build prompt (no labels, exterior focus, facts woven in) ----
-#     facts_block = f"Facts to use accurately: {facts}\n\n" if facts else ""
-#     prompt = (
-#         f"{fewshot_block}"
-#         "Write a cohesive architectural narrative about the exterior of the building in the image.\n"
-#         f"Produce {num_paras} paragraphs. Each paragraph has {min_sents} to {max_sents} short sentences.\n"
-#         "Plain English, present tense, active voice. Use only commas and periods. No headings or bullets. No meta commentary.\n"
-#         "Begin with the distant view and light. Then composition, balance, symmetry, proportion, rhythm using parts such as arches, bays, columns, cornices, joints, openings. "
-#         "Include relevant historical context if known. Finish with materials, textures, crafted details, signs of age or repair, and the feeling at human scale.\n"
-#         "Do not discuss interiors. Do not fabricate names or dates.\n\n"
-#         f"{facts_block}"
-#         f"Cues: {', '.join(cues)}.\n"
-#         "Return only prose."
-#     )
-
-#     # ---- generate deterministically ----
-#     enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
-#     out = t5_model.generate(
-#         **enc,
-#         max_new_tokens=480,
-          
-#         num_beams=8,
-#         do_sample=False,
-#         length_penalty=1.08,
-#         no_repeat_ngram_size=6,
-#         encoder_no_repeat_ngram_size=6,
-#         repetition_penalty=1.38,
-#         early_stopping=True,
-#         bad_words_ids=_bad_words_ids(t5_tok),
-#     )
-#     text = t5_tok.decode(out[0], skip_special_tokens=True).strip()
-
-#     # ---- clean and arrange into the requested number of paragraphs ----
-#     text = re.sub(r"\[[^\]]+\]", " ", text)
-#     text = re.sub(r"(?i)(cues?|hints?)\s*:.*", " ", text)
-#     text = re.sub(r"(?i)paragraph\s*(one|two|three|four)\s*:?", " ", text)
-#     text = re.sub(r"[|_—\-]{2,}", " ", text)
-#     text = re.sub(r"\s+", " ", text).strip()
-
-#     # sentence split
-#     sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip().split()) >= 3]
-#     # drop any residual banned lines verbatim
-#     banned = {
-#         "The rhythm stays even and welcoming.",
-#         "Light softens edges and lifts the surface.",
-#         "Small crafted touches reward a second look.",
-#         "The balance feels calm and sure.",
-#     }
-#     sents = [s for s in sents if s not in banned]
-#     # cap length to something sane
-#     sents = sents[: num_paras * (max_sents + 1)]
-
-#     # chunk evenly across num_paras without inventing filler
-#     if not sents:
-#         result_en = ""
-#     else:
-#         approx = max(min_sents, min(max_sents, len(sents) // num_paras or min_sents))
-#         paras = []
-#         i = 0
-#         for p in range(num_paras - 1):
-#             j = min(len(sents), i + approx)
-#             paras.append(" ".join(sents[i:j]).strip()); i = j
-#         paras.append(" ".join(sents[i:]).strip())
-#         result_en = "\n\n".join([p for p in paras if p]).strip()
-
-#     if lang == "zh":
-#         parts = [p.strip() for p in result_en.split("\n\n") if p.strip()]
-#         zh_parts = translate_en_to_zh(parts)
-#         return "\n\n".join(zh_parts).strip()
-
-#     return result_en
-
-#story general 
-# @torch.inference_mode()
-# def write_story(metrics: dict, lang: str = "en") -> str:
-#     # Build human hints from metrics
-#     r  = metrics.get("facade_ratio_H_W", 1.5)
-#     v  = metrics.get("symmetry_vertical", 0.5)
-#     ry = metrics.get("rhythm_fft_peak", 1.0)
-#     fr = metrics.get("fractal_dimension", 1.4)
-#     w2w = metrics.get("window_to_wall_ratio", 0.22)
-
-#     hints = []
-#     hints.append("balanced overall" if 1.1 <= r <= 1.9 else ("slender vertical feel" if r > 2.0 else "grounded horizontal feel"))
-#     hints.append("strong symmetry" if v >= 0.65 else "relaxed symmetry")
-#     hints.append("clear repeating bays" if ry >= 1.2 else "soft rhythm")
-#     hints.append("rich ornament" if fr >= 1.55 else ("quiet detailing" if fr <= 1.25 else "measured detailing"))
-#     if w2w >= 0.45: hints.append("glassy frontage")
-#     elif w2w <= 0.10: hints.append("solid masonry presence")
-#     else: hints.append("comfortable window pattern")
-
-#     # prompt = (
-#     #     "You are an architecture narrator.\n"
-#     #     "Write EXACTLY three paragraphs, each 4 to 6 short sentences.\n"
-#     #     "Keep language simple. No style labels. No numbers. No bullet points.\n"
-#     #     "Focus on balance, symmetry, rhythm, light, and crafted details.\n"
-#     #     "Describe what the eye notices first, then what rewards a closer look.\n"
-#     #     f"Hints: {', '.join(hints)}\n"
-#     #     "Return only prose paragraphs separated by a blank line."
-#     # )
-#     prompt = (
-#     "Write exactly three paragraphs of 4–6 short sentences each.\n"
-#     "Plain English, present tense, active voice. Use only commas and periods.\n"
-#     "No headings, lists, or commentary about writing, readers, or process.\n"
-#     "Never use these words: article, analysis, study, survey, review, guide, overview, tutorial, introduction, conclusion, paragraph, page, section, passage, purpose, function, story, post.\n\n"
-#     f"Cues: {', '.join(hints)}.\n\n"
-#     "Paragraph one: distant view and light.\n"
-#     "Paragraph two: composition with balance, symmetry, proportion, rhythm using parts such as arches, bays, columns, cornices, joints, openings, and include style and era if known.\n"
-#     "Paragraph three: materials, craft, textures, signs of age or repair, and close human-scale feel.\n"
-#     "Return only the three paragraphs separated by one blank line."
-#     )
-
-
-#     enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
-#     gen_kwargs = dict(
-#         max_new_tokens=320,
-#         min_new_tokens=220,           # encourage 3 paras
-#         do_sample=True,
-#         temperature=0.7,
-#         top_p=0.9,
-#         no_repeat_ngram_size=3,
-#         repetition_penalty=1.12,
-#     )
-#     # (optional) bad words list if you defined BAD_WORD_IDS_EN elsewhere
-#     bad_ids = globals().get("BAD_WORD_IDS_EN")
-#     if bad_ids is not None:
-#         gen_kwargs["bad_words_ids"] = bad_ids
-
-#     out = t5_model.generate(**enc, **gen_kwargs)
-#     text_en = t5_tok.decode(out[0], skip_special_tokens=True).strip()
-
-#     # enforce 3 paragraphs
-#     paras_en = _group_into_three_paragraphs(text_en)
-
-#     if lang == "zh":
-#         paras_zh = translate_en_to_zh(paras_en)
-#         return _join_paragraphs(paras_zh)
-#     return _join_paragraphs(paras_en)
 
 # ---------------- Ranking ----------------
 def update_and_rank(score, name, hist_path=HIST_PATH):
