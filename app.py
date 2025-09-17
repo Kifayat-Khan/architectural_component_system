@@ -693,6 +693,99 @@ def guide_answer_from_info(question: str, info_text: str, LANG: str) -> str:
     if ans.upper().startswith("NOTFOUND"):
         return "NOTFOUND"
     return ans
+#-----------------explian the chart----------
+def _build_explainer_prompt(metrics: dict, norms: list[float], clip_score: float) -> str:
+    labels = ["Vert Sym","Rot Sym","Proportion","Win/Wall","Rhythm","Fractal"]
+    pairs  = [f"{lbl}={v:.2f}" for lbl, v in zip(labels, norms)]
+    mlines = [f"{k}={v}" for k, v in metrics.items()]
+
+    return (
+        "You are an architecture guide for a general audience.\n"
+        "Give 5–7 short bullet-point insights about this building’s chart values.\n"
+        "Each bullet must start with '- ' like this example:\n"
+        "- Example insight about the chart.\n\n"
+        "Normalized features (0–1): {pairs}\n"
+        "Raw metrics: {mlines}\n"
+        "Aesthetic proxy (0–10): {clip:.2f}\n"
+        "Now write the bullet points:"
+    ).format(pairs=', '.join(pairs), mlines=', '.join(mlines), clip=clip_score)
+
+@torch.inference_mode()
+def explain_aesthetic_viz(metrics: dict, norms: list[float], clip_score: float, lang: str = "en") -> str:
+    """
+    Generate a concise paragraph (about 4–6 sentences, ~90–130 words) that explains the chart.
+    • Model-only (FLAN-T5).
+    • English first, then translated to Chinese via translate_en_to_zh() when lang=='zh'.
+    """
+    labels = ["Vert Sym","Rot Sym","Proportion","Win/Wall","Rhythm","Fractal"]
+    pairs  = [f"{lbl}={v:.2f}" for lbl, v in zip(labels, norms)]
+    mlines = [f"{k}={v}" for k, v in metrics.items()]
+
+    # Mini glossary the model can ground on
+    glossary = (
+        "Vert Sym = left–right mirror similarity; high → balanced halves, low → one side differs. "
+        "Rot Sym = similarity after 180° rotation; high → strong central order, low → asymmetric massing. "
+        "Proportion = height/width; ~1.5 feels balanced, very low → squat, very high → slender. "
+        "Win/Wall = glass vs. wall; high → transparent/light, low → solid/masonry. "
+        "Rhythm = strength of repeating bays; high → clear repetition, low → irregular/flat. "
+        "Fractal = cross-scale detail; mid → measured, high → ornate, low → plain."
+    )
+
+    # One worked example to nudge length/style
+    example_in = (
+        "Normalized features (0–1): Vert Sym=0.12, Rot Sym=0.10, Proportion=0.18, "
+        "Win/Wall=0.09, Rhythm=0.16, Fractal=0.11. Aesthetic proxy: 2.1."
+    )
+    example_out = (
+        "The facade reads modest and plain, with limited symmetry and a squat frame that downplays vertical lift. "
+        "Low window-to-wall and rhythm suggest few repeating bays or muted contrast, so openings do not register strongly. "
+        "Detail feels restrained at multiple scales, which keeps the surface calm but also less engaging at a distance. "
+        "Altogether the composition prioritizes solidity over lightness, making the mass feel grounded. "
+        "Capture front-on in brighter conditions and include the full height to strengthen symmetry and rhythm cues."
+    )
+
+    # Prompt: paragraph, not bullets; explicit length; no echo of inputs
+    prompt = (
+        "You are an architecture guide. Write ONE concise paragraph (about 4–6 sentences, ~90–130 words) "
+        "that explains what these chart values imply about the facade. "
+        "Use plain language for a general audience. Do NOT repeat the input numbers or headings. "
+        "Cover symmetry, proportion, window-to-wall, rhythm, and detail richness, then end with ONE actionable tip.\n\n"
+        f"Glossary: {glossary}\n\n"
+        f"Example input: {example_in}\n"
+        f"Example output: {example_out}\n\n"
+        "Now write the paragraph (English only) for these values:\n"
+        f"Normalized features (0–1): {', '.join(pairs)}\n"
+        f"Raw metrics: {', '.join(mlines)}\n"
+        f"Aesthetic proxy (0–10): {clip_score:.2f}\n"
+        "Paragraph:"
+    )
+
+    enc = t5_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
+    out = t5_model.generate(
+        **enc,
+        max_new_tokens=360,           # allow enough room
+        num_beams=8,
+        do_sample=False,
+        length_penalty=1.10,          # encourage longer coherent output
+        no_repeat_ngram_size=3,
+        encoder_no_repeat_ngram_size=0,
+        early_stopping=True,
+        repetition_penalty=1.12,
+    )
+    en = t5_tok.decode(out[0], skip_special_tokens=True).strip()
+
+    # Light cleanup: remove stray quotes/labels and ensure it ends with a period.
+    en = en.replace("Paragraph:", "").strip()
+    if not en.endswith((".", "!", "?")):
+        en += "."
+
+    if lang == "zh":
+        zh_para_list = translate_en_to_zh([en])  # reuse your translator (paragraph-level)
+        return (zh_para_list[0] if zh_para_list else "").strip()
+
+    return en
+
+
 
 # -------- Language helper --------
 def _lang_text(en: str, zh: str, LANG: str) -> str:
@@ -981,7 +1074,8 @@ def make_report(
     ranking,
     story_text,
     lang: str = "en",
-    interiors: Optional[list] = None,   # <-- NEW
+    interiors: Optional[list] = None,
+    chart_explanation_text: Optional[str] = None,   # <-- added
 ):
     import io, re, time as _t
     from reportlab.lib.pagesizes import A4
@@ -1061,7 +1155,6 @@ def make_report(
         return "\n\n".join(parts[:6])
 
     def elide(text: str, max_w: float, font_name: str, font_size: int) -> str:
-        """Single-line ellipsis to fit width."""
         sw = pdfmetrics.stringWidth
         if sw(text, font_name, font_size) <= max_w:
             return text
@@ -1113,75 +1206,49 @@ def make_report(
             y -= leading
         y -= int(leading * 0.5)
 
-    # -------- Interior Views (NEW) --------
+    # Interior Views
     if interiors:
-        # new page if not enough room for a grid row
         if y < BOT + 160:
             c.showPage(); y = H - TOP
-
         c.setFont("STSong-Light", 12)
         c.drawString(LM, y, "Interior Views / 室内影像")
         y -= 10
-
         cols = 3
         gutter = 10.0
         cell_w = (W - LM - RM - gutter * (cols - 1)) / cols
         caption_font = "STSong-Light"
         caption_size = 9
         c.setFont(caption_font, caption_size)
-
         col_i = 0
         row_max_h = 0.0
         x = LM
-
         for item in interiors:
             path = (item or {}).get("image")
             cap  = (item or {}).get("caption", "Interior view")
-
-            # load safely
             try:
                 im = Image.open(path).convert("RGB")
             except Exception:
-                # skip unreadable images
                 continue
-
-            # ensure space for image + caption; if not, new row / page
-            min_cell_h = cell_w * 0.6 + 18  # conservative estimate
+            min_cell_h = cell_w * 0.6 + 18
             if y - min_cell_h < BOT:
-                # flush remaining columns as a new page row
                 c.showPage(); y = H - TOP
                 c.setFont("STSong-Light", 12)
                 c.drawString(LM, y, "Interior Views / 室内影像")
                 y -= 10
                 c.setFont(caption_font, caption_size)
-                x = LM
-                col_i = 0
-                row_max_h = 0.0
-
-            # draw image
+                x = LM; col_i = 0; row_max_h = 0.0
             img_h = draw_img_fit_top(im, x, y, cell_w)
-
-            # draw caption (single line, ellipsized)
             cap_y = y - img_h - 11
             c.setFont(caption_font, caption_size)
             c.drawString(x, cap_y, elide(cap, cell_w, caption_font, caption_size))
-
-            # track row height
-            used_h = img_h + 18  # image + space + caption
+            used_h = img_h + 18
             row_max_h = max(row_max_h, used_h)
-
-            # move to next column or wrap to next row
             col_i += 1
             if col_i < cols:
                 x += cell_w + gutter
             else:
-                # next row
                 y = y - row_max_h - 12
-                x = LM
-                col_i = 0
-                row_max_h = 0.0
-
-        # if last row not closed, move y below it so later content won't overlap
+                x = LM; col_i = 0; row_max_h = 0.0
         if col_i != 0:
             y = y - row_max_h - 12
 
@@ -1195,6 +1262,29 @@ def make_report(
         _ = draw_img_fit_top(viz_img, LM, y, W - LM - RM)
         w_px, h_px = viz_img.size
         y -= (W - LM - RM) * (h_px / float(w_px)) + 16
+
+    # Chart Explanation
+    if chart_explanation_text:
+        if y < BOT + 120:
+            c.showPage(); y = H - TOP
+            c.setFont("STSong-Light", 12)
+            c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
+            y -= 8
+        c.setFont("STSong-Light", 12)
+        c.drawString(LM, y, "Explanation / 解释")
+        y -= 14
+        body_font = "STSong-Light" if lang=="zh" else "Helvetica"
+        c.setFont(body_font, 10 if lang=="en" else 11)
+        leading = 13 if lang=="en" else 14
+        max_w = W - LM - RM
+        for para in chart_explanation_text.split("\n\n"):
+            for ln in wrap_text_to_width(para, max_w, body_font, 10 if lang=="en" else 11):
+                if y < BOT:
+                    c.showPage(); y = H - TOP
+                    c.setFont(body_font, 10 if lang=="en" else 11)
+                c.drawString(LM, y, ln)
+                y -= leading
+            y -= int(leading * 0.5)
 
     # Ranking + metrics
     c.setFont("Helvetica", 11)
@@ -1329,6 +1419,13 @@ if uploaded:
             st.image(viz_img, caption="Feature profile and score makeup", width="stretch")
         except TypeError:
             st.image(viz_img, caption="Feature profile and score makeup", use_column_width=True)
+        
+            #---explianing of chart
+        with st.spinner("Explaining the chart..."):
+            chart_explanation = explain_aesthetic_viz(metrics_dict, norms, clip_score, lang=LANG)
+
+        st.markdown("#### Explanation / 解释")
+        st.markdown(chart_explanation)
 
         # Ranking
         rank, N, perc = update_and_rank(clip_score, Path(up.name).stem, HIST_PATH)
@@ -1341,7 +1438,8 @@ if uploaded:
             ranking=(rank, N, perc),
             story_text=story,
             lang=LANG,
-            interiors=(matched_card.get("interiors") if matched_card else None)
+            interiors=(matched_card.get("interiors") if matched_card else None),
+            chart_explanation_text=chart_explanation    # <-- pass it here
             )
         if not isinstance(pdf_bytes, (bytes, bytearray)):
             st.error("PDF generation failed. No binary data returned.")            
