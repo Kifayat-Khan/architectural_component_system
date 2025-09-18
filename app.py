@@ -216,6 +216,103 @@ def show_interior_gallery(card: dict):
                 st.image(img, caption=cap, width='stretch')
         except Exception as e:
             st.warning(f"Could not load interior image: {path} ({e})")
+#--------------image verification helpers-----------
+def _read_image_rgb(path: str):
+    try:
+        return cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+
+def _resize_max_side(img: np.ndarray, max_side: int = 720) -> np.ndarray:
+    h, w = img.shape[:2]
+    if max(h, w) <= max_side:
+        return img
+    scale = max_side / float(max(h, w))
+    return cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+
+def orb_inlier_ratio(query_path: str, cand_path: str, max_side: int = 720) -> float:
+    """
+    Quick geometric check: ORB + RANSAC homography inliers / min(keypoints).
+    Returns 0..1; ~0.0 means weak geometric agreement.
+    """
+    q = _read_image_rgb(query_path); c = _read_image_rgb(cand_path)
+    if q is None or c is None:
+        return 0.0
+    q = _resize_max_side(q, max_side); c = _resize_max_side(c, max_side)
+    qg = cv2.cvtColor(q, cv2.COLOR_RGB2GRAY); cg = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+    orb = cv2.ORB_create(1000)
+    kq, dq = orb.detectAndCompute(qg, None)
+    kc, dc = orb.detectAndCompute(cg, None)
+    if dq is None or dc is None or len(kq) < 20 or len(kc) < 20:
+        return 0.0
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    matches = bf.knnMatch(dq, dc, k=2)
+    good = [m for m, n in matches if m.distance < 0.75 * n.distance]
+    if len(good) < 12:
+        return 0.0
+    src = np.float32([kq[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    dst = np.float32([kc[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
+    if H is None or mask is None:
+        return 0.0
+    inliers = int(mask.sum())
+    denom = max(1, min(len(kq), len(kc)))
+    return float(inliers) / float(denom)
+@torch.inference_mode()
+def retrieve_topk(image_path: str, index_npz: str, device: str, k: int = 5):
+    ids, vecs, cards_path = load_index(index_npz)
+    q = embed_image(image_path, device)           # [D], L2-normalized
+    sims = vecs @ q
+    top_idx = np.argsort(-sims)[:max(1, k)]
+    cards = load_cards_jsonl(cards_path)
+    id2card = {c["id"]: c for c in cards}
+    out = []
+    for i in top_idx:
+        card = id2card.get(ids[i])
+        if card:
+            out.append((card, float(sims[i])))
+    return out
+def retrieve_verified(
+    image_path: str,
+    index_npz: str,
+    device: str,
+    base_threshold: float = 0.34,   # stricter than 0.22
+    margin: float = 0.05,           # s1 must be > s2 + margin to avoid ties
+    inlier_floor: float = 0.06,     # ORB inlier ratio must pass this
+    alpha: float = 0.85             # weight for CLIP vs ORB in combined score
+) -> Tuple[Optional[Dict[str, Any]], float, Dict[str, float]]:
+    """
+    Returns (card or None, combined_score, debug_stats).
+    Rejects if:
+      - top score < base_threshold,
+      - margin to #2 is small,
+      - ORB inlier ratio too low.
+    """
+    top = retrieve_topk(image_path, index_npz, device, k=3)
+    if not top:
+        return None, 0.0, {"reason": "no_candidates"}
+
+    # Score margin check
+    s1 = top[0][1]
+    s2 = top[1][1] if len(top) > 1 else -1.0
+    if s1 < base_threshold:
+        return None, s1, {"reason": "below_threshold", "s1": s1, "thr": base_threshold}
+    if s2 >= 0 and (s1 - s2) < margin:
+        return None, s1, {"reason": "low_margin", "s1": s1, "s2": s2, "margin": margin}
+
+    # ORB geometric verification on best
+    best_card = top[0][0]
+    cand_img_path = best_card.get("image")
+    if not cand_img_path or not Path(cand_img_path).exists():
+        return None, s1, {"reason": "missing_candidate_image", "s1": s1}
+
+    inlier_ratio = orb_inlier_ratio(image_path, cand_img_path)
+    if inlier_ratio < inlier_floor:
+        return None, s1, {"reason": "low_inliers", "s1": s1, "inliers": inlier_ratio}
+
+    combined = alpha * s1 + (1.0 - alpha) * inlier_ratio
+    return best_card, combined, {"reason": "ok", "s1": s1, "s2": s2, "inliers": inlier_ratio, "combined": combined}
+
 
 # ---------------- Visualization helpers ----------------
 def show_img(col_like, img, caption):
@@ -804,7 +901,8 @@ def write_story(
     match_threshold: float = 0.22,
     fewshot: Optional[List[Tuple[str, str]]] = None,
     k_examples: int = 2,
-) -> str:
+    ground_card: Optional[dict] = None, 
+) -> Tuple[str, Optional[dict]]:
     """
     Generic 3-paragraph narrative with DB-first priority:
 
@@ -818,12 +916,15 @@ def write_story(
 
     device = str(next(t5_model.parameters()).device)
 
-    # ---------- retrieve nearest card (for grounding) ----------
-    card: Optional[dict] = None
-    if image_path and Path(index_npz).exists():
+    # choose grounding card
+    card: Optional[dict] = ground_card
+    if card is None and image_path and Path(index_npz).exists():
         try:
-            c, s = retrieve(image_path, index_npz, device)
-            if c and s >= match_threshold:
+            c, score, dbg = retrieve_verified(
+                image_path, index_npz, device,
+                base_threshold=match_threshold, margin=0.05, inlier_floor=0.06
+            )
+            if c:
                 card = c
         except Exception:
             card = None
@@ -891,8 +992,8 @@ def write_story(
         if lang == "zh":
             parts = [p for p in result_en.split("\n\n") if p.strip()]
             zh_parts = translate_en_to_zh(parts)
-            return "\n\n".join(zh_parts).strip()
-        return result_en
+            return "\n\n".join(zh_parts).strip(), card
+        return result_en, card
 
     # ---------- normalize elements/materials (exterior-only) ----------
     raw_elements  = [e for e in (card or {}).get("elements", []) if isinstance(e, str)]
@@ -1042,9 +1143,9 @@ def write_story(
     if lang == "zh":
         parts = [p for p in result_en.split("\n\n") if p.strip()]
         zh_parts = translate_en_to_zh(parts)
-        return "\n\n".join(zh_parts).strip()
+        return ("\n\n".join(zh_parts).strip(), card)
 
-    return result_en
+    return (result_en, card)
 
 
 
@@ -1354,23 +1455,45 @@ if uploaded:
         # Save current upload for CLIP retrieval
         tmp_image_path = str(Path("outputs") / f"_tmp_{Path(up.name).stem}.png")
         pil.save(tmp_image_path)
+        
+        # --- Verified retrieval (single source of truth for grounding) ---
+        verified_card = None
+        match_info = ""
+        try:
+            verified_card, combined, dbg = retrieve_verified(
+                tmp_image_path, "data/index_clip.npz", device,
+                base_threshold=0.34,   # stricter than 0.22
+                margin=0.05,
+                inlier_floor=0.06,
+                alpha=0.85
+            )
+            if verified_card:
+                match_info = (
+                    f"DB match: {verified_card.get('name','?')} "
+                    f"(combined={dbg.get('combined',0):.3f}, "
+                    f"s1={dbg.get('s1',0):.3f}, "
+                    f"inliers={dbg.get('inliers',0):.3f})"
+                )
+            else:
+                match_info = (
+            f"No reliable DB match "
+                    f"({dbg.get('reason','?')}, s1={dbg.get('s1',0):.3f})"
+                )
+        except Exception as _e:
+            match_info = f"DB match error: {_e}"
 
+        if match_info:
+            st.caption(match_info)
+
+        # now call write_story and pass verified_card as ground_card
         with st.spinner("Writing the story..."):
-            story = write_story(
+            story, used_card = write_story(
                 metrics_dict,
                 lang=LANG,
-                image_path=tmp_image_path,
+                image_path=None,          # already have tmp_image_path verified
+                ground_card=verified_card
             )
-        story = sanitize_story_text(story)
 
-        # try to retrieve the same card your writer used
-        matched_card = None
-        try:
-            c, s = retrieve(tmp_image_path, "data/index_clip.npz", device)
-            if c and s >= 0.22:
-                matched_card = c
-        except Exception:
-            pass
 
         st.markdown("### Design Narrative / 設計敘事")
         st.write(story)
@@ -1384,7 +1507,7 @@ if uploaded:
                                key=qa_key)
 
         if user_q:
-            info_text = (matched_card or {}).get("info", "")
+            info_text = (used_card or {}).get("info", "")
             ans = guide_answer_from_info(user_q, info_text, LANG)
             if ans == "NOTFOUND":
                 st.warning(_lang_text(
@@ -1395,8 +1518,8 @@ if uploaded:
                 st.success(ans)
 
         #---interiour designs 
-        if matched_card and matched_card.get("interiors"):
-            show_interior_gallery(matched_card)
+        if used_card and used_card.get("interiors"):
+            show_interior_gallery(used_card)
 
 
         # with st.spinner("Writing the story..."):
@@ -1438,7 +1561,7 @@ if uploaded:
             ranking=(rank, N, perc),
             story_text=story,
             lang=LANG,
-            interiors=(matched_card.get("interiors") if matched_card else None),
+            interiors=(used_card.get("interiors") if used_card else None),
             chart_explanation_text=chart_explanation    # <-- pass it here
             )
         if not isinstance(pdf_bytes, (bytes, bytearray)):
