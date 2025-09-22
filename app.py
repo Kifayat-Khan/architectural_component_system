@@ -61,8 +61,56 @@ with st.sidebar:
     lang_choice = st.selectbox("Language / 語言", ["English", "中文 (简体)"], index=0)
 
 LANG = "zh" if lang_choice.startswith("中文") else "en"
+#----
+# --- First-load popup ---------------------------------------------------------
+# Show once per browser session
+if "show_welcome" not in st.session_state:
+    st.session_state.show_welcome = True
+
+# Prefer Streamlit's dialog if available; fall back to a banner on older versions
+def _welcome_body():
+    if LANG == "zh":
+        st.markdown(
+            "### 使用说明\n"
+            "1. 上传建筑立面图片。\n"
+            "2. 程序将检测元素、计算指标、生成叙事，并导出 PDF。\n"
+            "3. 全部在本地运行，不调用外部 API。\n"
+            "#### 注意："
+            "数据库中仅存在林志群的纪念图像和信息。\n"
+        )
+        if st.button("我知道了"):
+            st.session_state.show_welcome = False
+            st.rerun()
+    else:
+        st.markdown(
+            "### Quick start\n"
+            "1. Upload facade images.\n"
+            "2. The app detects components, computes metrics, writes a narrative, and exports a PDF.\n"
+            "#### Note: \n"
+            "In the database only the Lin Chih-Chun memorial images and information exist."
+        )
+        if st.button("Got it"):
+            st.session_state.show_welcome = False
+            st.rerun()
+
+if st.session_state.show_welcome:
+    if hasattr(st, "dialog"):  # Streamlit ≥ 1.30
+        @st.dialog("Welcome" if LANG == "en" else "欢迎")
+        def _welcome_dialog():
+            _welcome_body()
+        _welcome_dialog()
+    else:
+        # Fallback: show a top banner once
+        _welcome_body()  # renders text + button inline as a one-time banner
+        # If you prefer a lighter hint instead, replace the call above with:
+        # st.info("Quick start: upload images, the app analyzes and exports a PDF. Local only.")
+        # st.session_state.show_welcome = False
+# ------------------------------------------------------------------------------
 
 
+
+
+#----
 uploaded = st.file_uploader(
     "Upload Building FaCade Image / 上传建筑立面图片", type=["jpg", "jpeg", "png"], accept_multiple_files=True
 )
