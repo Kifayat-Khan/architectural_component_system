@@ -1,0 +1,12 @@
+streamlit
+pillow
+numpy<2
+scikit-image
+matplotlib
+reportlab
+opencv-python-headless
+transformers
+accelerate
+sentencepiece
+safetensors
+torch
