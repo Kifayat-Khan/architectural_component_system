@@ -360,7 +360,257 @@ def retrieve_verified(
 
     combined = alpha * s1 + (1.0 - alpha) * inlier_ratio
     return best_card, combined, {"reason": "ok", "s1": s1, "s2": s2, "inliers": inlier_ratio, "combined": combined}
+# ===== NEW: Ten Principles of Beauty metrics =====
+def _safe_norm01(x, lo, hi):
+    return float(np.clip((x - lo) / (hi - lo + 1e-6), 0.0, 1.0))
 
+def _edge_map(pil_img):
+    g = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2GRAY)
+    g = cv2.GaussianBlur(g, (3,3), 0)
+    e = cv2.Canny(g, 80, 180).astype(np.float32)
+    return g.astype(np.float32), e
+
+def principle_symmetry(sym_v, sym_r):
+    # combine vertical + rotational (already computed)
+    return float(np.clip(0.6*sym_v + 0.4*sym_r, 0, 1))
+
+def principle_balance(pil_img):
+    g, e = _edge_map(pil_img)
+    H, W = e.shape
+    yy, xx = np.mgrid[0:H, 0:W]
+    m = e + 1e-6
+    cx = float((xx*m).sum()/m.sum()); cy = float((yy*m).sum()/m.sum())
+    dx = abs(cx - (W-1)/2.0) / ((W-1)/2.0 + 1e-6)
+    dy = abs(cy - (H-1)/2.0) / ((H-1)/2.0 + 1e-6)
+    centroid_term = 1.0 - np.clip((dx+dy)/2.0, 0, 1)
+    # left/right energy balance
+    left = e[:, :W//2].sum(); right = e[:, W//2:].sum()
+    lr = 1.0 - (abs(left-right) / (left+right+1e-6))
+    return float(np.clip(0.5*centroid_term + 0.5*lr, 0, 1))
+
+def _lab(pil_img):
+    rgb = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L, a, b = lab[:,:,0], lab[:,:,1], lab[:,:,2]
+    return L, a, b
+
+def principle_harmony(pil_img, facade_mask=None):
+    # low chroma dispersion across slices + palette continuity
+    L, a, b = _lab(pil_img)
+    H, W = L.shape
+    cols = 6
+    widths = np.array_split(np.arange(W), cols)
+    slice_means = []
+    for idx in widths:
+        if idx.size == 0: continue
+        aa = a[:, idx].mean()
+        bb = b[:, idx].mean()
+        slice_means.append([aa, bb])
+    slice_means = np.array(slice_means) if slice_means else np.zeros((1,2))
+    # dispersion (lower = more harmonious)
+    disp = float(np.linalg.norm(slice_means - slice_means.mean(axis=0), axis=1).mean())
+    # map typical dispersion [2..12] to harmony [1..0]
+    return float(np.clip(1.0 - _safe_norm01(disp, 2.0, 12.0), 0, 1))
+
+def principle_contrast(pil_img):
+    L, _, _ = _lab(pil_img)
+    # RMS contrast normalized by plausible range
+    rms = float(L.std())
+    # texture contrast via Laplacian variance
+    tex = float(cv2.Laplacian(L, cv2.CV_32F, ksize=3).var()**0.5)
+    raw = 0.6 * _safe_norm01(rms, 5.0, 35.0) + 0.4 * _safe_norm01(tex, 2.0, 25.0)
+    return float(np.clip(raw, 0, 1))
+
+def principle_proportion(aspect_ratio, w2w):
+    # balanced aspect plus moderate WWR
+    ar_term = np.exp(-((aspect_ratio - 1.5)**2)/(2*0.4**2))
+    wwr_term = np.exp(-((w2w - 0.22)**2)/(2*0.12**2))
+    return float(np.clip(0.6*ar_term + 0.4*wwr_term, 0, 1))
+
+def _column_autocorr(signal):
+    sig = signal - signal.mean()
+    ac = np.correlate(sig, sig, mode='full')[len(sig)-1:]
+    if ac[0] <= 0: 
+        return 0.0
+    ac /= ac[0]
+    # first non-zero lag peak prominence
+    if len(ac) < 3: 
+        return 0.0
+    k = int(np.argmax(ac[1:len(ac)//2])) + 1
+    return float(max(0.0, ac[k]))
+
+def principle_rhythm(pil_img):
+    # reuse FFT rhythm for frequency clarity + column autocorr for repetition
+    g = rgb2gray(np.array(pil_img))
+    edges = sobel(g)
+    F = np.fft.fftshift(np.fft.fft2(edges))
+    mag = np.log1p(np.abs(F))
+    center = np.array(mag.shape)/2
+    ys, xs = np.indices(mag.shape)
+    r = np.hypot(xs-center[1], ys-center[0])
+    ring = (r>20) & (r<120)
+    fft_term = float(np.quantile(mag[ring], 0.98) / (np.mean(mag[ring]) + 1e-6)) if ring.sum() else 0.0
+    fft_term = float(np.clip(fft_term/4.0, 0, 1))
+    # autocorr on column edge energy
+    e = cv2.Canny((g*255).astype(np.uint8), 80, 180).astype(np.float32)
+    col_sig = e.sum(axis=0)
+    ac = _column_autocorr(col_sig)
+    ac_term = float(np.clip(ac, 0, 1))
+    return float(np.clip(0.6*fft_term + 0.4*ac_term, 0, 1))
+
+def principle_repetition(pil_img):
+    # alias to rhythm (or keep autocorr-only if you prefer separation)
+    return principle_rhythm(pil_img)
+
+def principle_simplicity(pil_img):
+    # inverse complexity: low edge density & low edge entropy → simple
+    _, e = _edge_map(pil_img)
+    density = float(e.mean())  # 0..1-ish after scaling
+    hist, _ = np.histogram(e, bins=16, range=(0,255), density=True)
+    p = hist + 1e-8; p /= p.sum()
+    entropy = float(-(p*np.log(p)).sum())  # ~[0..~2.8]
+    d_term = 1.0 - _safe_norm01(density*255.0, 5.0, 35.0)
+    h_term = 1.0 - _safe_norm01(entropy, 1.0, 2.8)
+    return float(np.clip(0.6*d_term + 0.4*h_term, 0, 1))
+
+def principle_unity(pil_img, dets):
+    # consistency across vertical slices: hue/geometry variance low → unity high
+    L, a, b = _lab(pil_img); H, W = L.shape
+    cols = 6
+    idxs = np.array_split(np.arange(W), cols)
+    hue_means = []
+    for idc in idxs:
+        if idc.size == 0: continue
+        hue_means.append([a[:, idc].mean(), b[:, idc].mean()])
+    hue_means = np.array(hue_means) if hue_means else np.zeros((1,2))
+    hue_var = float(hue_means.var(axis=0).mean())
+    hue_term = 1.0 - _safe_norm01(hue_var, 2.0, 18.0)
+    # window size consistency
+    ws = []
+    for d in dets:
+        if d.get("label") == "window":
+            x1,y1,x2,y2 = d["box"]
+            ws.append((x2-x1)*(y2-y1))
+    if len(ws) >= 3:
+        ws = np.array(ws, dtype=np.float32)
+        wcv = float(ws.std()/(ws.mean()+1e-6))  # coefficient of variation
+        size_term = 1.0 - np.clip(wcv/1.0, 0, 1)  # 0..1
+    else:
+        size_term = 0.5
+    return float(np.clip(0.5*hue_term + 0.5*size_term, 0, 1))
+
+def principle_gradation(pil_img):
+    # monotonicity of vertical lightness profile (L*) → smooth gradation
+    L,_,_ = _lab(pil_img)
+    prof = L.mean(axis=1)  # per row
+    diffs = np.diff(prof)
+    if len(diffs) == 0:
+        return 0.5
+    signs = np.sign(diffs)
+    # proportion of consistent sign segments
+    same = np.sum(signs[:-1]*signs[1:] >= 0)
+    mono = same / max(1, len(signs)-1)
+    return float(np.clip(mono, 0, 1))
+
+def compute_ten_principles(pil_img, dets, sym_v, sym_r, ratio, w2w):
+    scores = {}
+    scores["symmetry"]   = principle_symmetry(sym_v, sym_r)
+    scores["balance"]    = principle_balance(pil_img)
+    scores["harmony"]    = principle_harmony(pil_img)
+    scores["contrast"]   = principle_contrast(pil_img)
+    scores["proportion"] = principle_proportion(ratio, w2w)
+    scores["rhythm"]     = principle_rhythm(pil_img)
+    scores["repetition"] = principle_repetition(pil_img)
+    scores["simplicity"] = principle_simplicity(pil_img)
+    scores["unity"]      = principle_unity(pil_img, dets)
+    scores["gradation"]  = principle_gradation(pil_img)
+    # clamp to 0..1
+    for k in list(scores.keys()):
+        scores[k] = float(np.clip(scores[k], 0, 1))
+    return scores
+
+# --- Ten Principles: composite + line chart ---
+
+def composite_beauty_score(principles: dict[str, float]) -> float:
+    """Simple composite (0–1): mean across the ten principles."""
+    vals = [float(v) for v in principles.values() if v is not None]
+    return float(np.mean(vals)) if vals else 0.0
+
+# --- Composite beauty score (mean of the ten principles) ---
+def composite_beauty_score(principles: dict[str, float]) -> float:
+    vals = [float(v) for v in principles.values()]
+    return float(np.mean(vals)) if vals else 0.0
+# --- NEW: dual-axis beauty chart ---------------------------------------------
+def composite_beauty_score(principles: dict[str, float],
+                           weights: dict[str, float] | None = None) -> float:
+    """Return overall beauty in [0,1]. If weights given, use weighted mean."""
+    order = [
+        "repetition","gradation","symmetry","balance","harmony",
+        "contrast","proportion","rhythm","simplicity","unity"
+    ]
+    vals = np.array([float(principles.get(k, 0.0)) for k in order], dtype=float)
+    if weights:
+        w = np.array([float(weights.get(k, 1.0)) for k in order], dtype=float)
+        w = np.clip(w, 1e-8, None)
+        return float(np.clip(np.sum(vals * w) / np.sum(w), 0.0, 1.0))
+    return float(np.clip(vals.mean(), 0.0, 1.0))
+
+
+# --- Overall beauty (0–1) ----------------------------------------------------
+def composite_beauty_score(principles: dict[str, float]) -> float:
+    """Unweighted mean of the ten principles, clipped to [0,1]."""
+    order = [
+        "repetition","gradation","symmetry","balance","harmony",
+        "contrast","proportion","rhythm","simplicity","unity"
+    ]
+    vals = np.array([float(principles.get(k, 0.0)) for k in order], dtype=float)
+    if vals.size == 0:
+        return 0.0
+    return float(np.clip(vals.mean(), 0.0, 1.0))
+
+
+def build_overall_beauty_line(score: float, figsize=(10, 4), lang: str = "en") -> Image.Image:
+    """
+    Draw a ramp-style line chart for a single overall beauty score in [0,1].
+    The line increases from (x=0, y=0) to (x=1, y=score).
+    """
+    score = float(np.clip(score, 0.0, 1.0))
+    # make a smooth ramp
+    x = np.linspace(0.0, 1.0, 60)
+    y = np.linspace(0.0, score, 60)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_ylim(0, 1)
+    ax.set_xlim(0, 1)
+
+    # the ramp line + a marker at the end
+    ax.plot(x, y, linewidth=3)
+    ax.plot([1.0], [score], marker="o", markersize=8)
+
+    # light fill under the line (optional, looks nice)
+    ax.fill_between(x, 0, y, alpha=0.15)
+
+    # faint horizontal reference at the score
+    ax.axhline(score, linestyle="--", linewidth=1, alpha=0.5)
+
+    # labels / title
+    title = "Overall Facade Beauty (0–1)" if lang != "zh" else "立面总体美度（0–1）"
+    ax.set_title(title)
+    ax.set_xlabel("Overall index")
+    ax.set_ylabel("Beauty score")
+
+    ax.set_xticks([0.0, 0.5, 1.0])
+    ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    ax.grid(True, linestyle=":", alpha=0.6)
+
+    # annotate the value at the end
+    ax.text(1.0, score, f"{score:.2f}", va="bottom", ha="right", fontsize=10, weight="bold")
+
+    fig.tight_layout()
+    return fig_to_pil(fig, dpi=300)
+
+
+# end ten 10 principle
 
 # ---------------- Visualization helpers ----------------
 def show_img(col_like, img, caption):
@@ -376,7 +626,7 @@ def show_img(col_like, img, caption):
     try:
         col_like.image(img, caption=caption, width='stretch')
     except TypeError:
-        col_like.image(img, caption=caption, use_column_width=True)
+        col_like.image(img, caption=caption, use_container_width=True)
 
 def pil_from_upload(up):
     return Image.open(io.BytesIO(up.read())).convert("RGB")
@@ -459,6 +709,22 @@ def nms_boxes(dets, iou_thr=0.30):
         inds = np.where(iou <= iou_thr)[0]
         order = order[inds + 1]
     return [dets[i] for i in keep]
+
+
+# ===== NEW: Principles visualization (bar chart) =====
+def build_principles_viz(principles: dict[str, float], figsize=(10,5)):
+    labels = ["repetition","gradation","symmetry","balance","harmony",
+              "contrast","proportion","rhythm","simplicity","unity"]
+    vals = [float(principles.get(k, 0.0)) for k in labels]
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111)
+    ax.bar(labels, vals)
+    ax.set_ylim(0, 1.0)
+    ax.set_ylabel("Score (0–1)")
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_title("Ten Principles of Beauty")
+    fig.tight_layout()
+    return fig_to_pil(fig, dpi=300)
 
 # ---------------- Simple heuristic component detection ----------------
 COMPONENT_QUERIES = ["window","arch"]  # heuristic guessers
@@ -1224,8 +1490,11 @@ def make_report(
     story_text,
     lang: str = "en",
     interiors: Optional[list] = None,
-    chart_explanation_text: Optional[str] = None,   # <-- added
+    chart_explanation_text: Optional[str] = None,
+    principles_img: Optional[Image.Image] = None,        # <-- NEW
+    principles_scores: Optional[dict] = None,            # <-- NEW
 ):
+
     import io, re, time as _t
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
@@ -1411,6 +1680,30 @@ def make_report(
         _ = draw_img_fit_top(viz_img, LM, y, W - LM - RM)
         w_px, h_px = viz_img.size
         y -= (W - LM - RM) * (h_px / float(w_px)) + 16
+    
+        # Ten Principles page (image + compact list)
+    if principles_img is not None or principles_scores is not None:
+        if y < BOT + 280:
+            c.showPage(); y = H - TOP
+        c.setFont("STSong-Light", 12)
+        c.drawString(LM, y, "Ten Principles of Beauty / 十大美学原则")
+        y -= 8
+        if principles_img is not None:
+            _ = draw_img_fit_top(principles_img, LM, y, W - LM - RM)
+            w_px, h_px = principles_img.size
+            y -= (W - LM - RM) * (h_px / float(w_px)) + 12
+        if principles_scores:
+            c.setFont("Helvetica", 10)
+            items = ["repetition","gradation","symmetry","balance","harmony",
+                     "contrast","proportion","rhythm","simplicity","unity"]
+            for k in items:
+                v = principles_scores.get(k)
+                if v is None: continue
+                if y < BOT:
+                    c.showPage(); y = H - TOP; c.setFont("Helvetica", 10)
+                c.drawString(LM, y, f"{k.capitalize()}: {float(v):.2f}")
+                y -= 12
+
 
     # Chart Explanation
     if chart_explanation_text:
@@ -1476,6 +1769,10 @@ if uploaded:
         sym_v, sym_r = compute_symmetry_scores(pil)
         rhythm = compute_rhythm_fft(pil)
         fractal = box_count_fractal_dimension(pil)
+        # ===== NEW: Ten Principles scores =====
+        principles = compute_ten_principles(pil, dets, sym_v, sym_r, ratio, w2w)
+        principles_img = build_principles_viz(principles)
+
 
         # Heatmap
         with st.spinner("Computing heatmap..."):
@@ -1499,6 +1796,8 @@ if uploaded:
             "fractal_dimension": round(fractal, 3),
             "aesthetic_proxy": round(clip_score, 2)
         }
+        metrics_dict.update({f"principle_{k}": round(v, 3) for k, v in principles.items()})
+
         
         # Save current upload for CLIP retrieval
         tmp_image_path = str(Path("outputs") / f"_tmp_{Path(up.name).stem}.png")
@@ -1541,6 +1840,15 @@ if uploaded:
                 image_path=None,          # already have tmp_image_path verified
                 ground_card=verified_card
             )
+                # ===== NEW: add a short principles summary after the story =====
+        top3 = sorted(principles.items(), key=lambda x: -x[1])[:3]
+        low2 = sorted(principles.items(), key=lambda x: x[1])[:2]
+        if LANG == "zh":
+            extra = f"\n\n美学要点：优势在 {', '.join([k for k,_ in top3])}；较弱在 {', '.join([k for k,_ in low2])}。"
+        else:
+            extra = f"\n\nAesthetic highlights: strengths in {', '.join([k for k,_ in top3])}; weaker in {', '.join([k for k,_ in low2])}."
+        story = (story or "").strip() + extra
+
 
 
         st.markdown("### Design Narrative / 設計敘事")
@@ -1589,11 +1897,27 @@ if uploaded:
         try:
             st.image(viz_img, caption="Feature profile and score makeup", width="stretch")
         except TypeError:
-            st.image(viz_img, caption="Feature profile and score makeup", use_column_width=True)
+            st.image(viz_img, caption="Feature profile and score makeup", use_container_width=True)
         
             #---explianing of chart
         with st.spinner("Explaining the chart..."):
             chart_explanation = explain_aesthetic_viz(metrics_dict, norms, clip_score, lang=LANG)
+
+        # 10 prinical
+        st.markdown("### Ten Principles of Beauty / 十大美学原则")
+        st.image(principles_img, caption="Normalized 0–1 scores per principle", use_container_width=True)
+        # Compute composite beauty and make the simple line chart
+        overall_beauty = composite_beauty_score(principles)
+        overall_img = build_overall_beauty_line(overall_beauty)
+
+        st.markdown("### Overall Facade Beauty / 立面总体美度")
+        try:
+            st.image(overall_img, caption=f"Overall beauty = {overall_beauty:.2f}", width="stretch")
+        except TypeError:
+            st.image(overall_img, caption=f"Overall beauty = {overall_beauty:.2f}", use_column_width=True)
+        
+        st.info(f"Overall Beauty (0–1): **{overall_beauty:.2f}**")
+        #---10 prn end 
 
         st.markdown("#### Explanation / 解释")
         st.markdown(chart_explanation)
@@ -1610,7 +1934,10 @@ if uploaded:
             story_text=story,
             lang=LANG,
             interiors=(used_card.get("interiors") if used_card else None),
-            chart_explanation_text=chart_explanation    # <-- pass it here
+            chart_explanation_text=chart_explanation,    # <-- pass it here
+            principles_img=principles_img,                 # <-- NEW
+            principles_scores=principles                   # <-- NEW
+
             )
         if not isinstance(pdf_bytes, (bytes, bytearray)):
             st.error("PDF generation failed. No binary data returned.")            
