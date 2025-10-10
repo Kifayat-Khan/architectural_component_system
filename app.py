@@ -530,35 +530,13 @@ def compute_ten_principles(pil_img, dets, sym_v, sym_r, ratio, w2w):
     return scores
 
 # --- Ten Principles: composite + line chart ---
-
-def composite_beauty_score(principles: dict[str, float]) -> float:
-    """Simple composite (0–1): mean across the ten principles."""
-    vals = [float(v) for v in principles.values() if v is not None]
-    return float(np.mean(vals)) if vals else 0.0
-
-# --- Composite beauty score (mean of the ten principles) ---
-def composite_beauty_score(principles: dict[str, float]) -> float:
-    vals = [float(v) for v in principles.values()]
-    return float(np.mean(vals)) if vals else 0.0
-# --- NEW: dual-axis beauty chart ---------------------------------------------
-def composite_beauty_score(principles: dict[str, float],
-                           weights: dict[str, float] | None = None) -> float:
-    """Return overall beauty in [0,1]. If weights given, use weighted mean."""
-    order = [
-        "repetition","gradation","symmetry","balance","harmony",
-        "contrast","proportion","rhythm","simplicity","unity"
-    ]
-    vals = np.array([float(principles.get(k, 0.0)) for k in order], dtype=float)
-    if weights:
-        w = np.array([float(weights.get(k, 1.0)) for k in order], dtype=float)
-        w = np.clip(w, 1e-8, None)
-        return float(np.clip(np.sum(vals * w) / np.sum(w), 0.0, 1.0))
-    return float(np.clip(vals.mean(), 0.0, 1.0))
-
-
 # --- Overall beauty (0–1) ----------------------------------------------------
-def composite_beauty_score(principles: dict[str, float]) -> float:
-    """Unweighted mean of the ten principles, clipped to [0,1]."""
+def composite_beauty_score(principles: Dict[str, float],
+                           weights: Optional[Dict[str, float]] = None) -> float:
+    """
+    Return overall beauty in [0,1] as the mean of the Ten Principles.
+    If weights are provided, compute a weighted mean (still clipped to [0,1]).
+    """
     order = [
         "repetition","gradation","symmetry","balance","harmony",
         "contrast","proportion","rhythm","simplicity","unity"
@@ -566,6 +544,10 @@ def composite_beauty_score(principles: dict[str, float]) -> float:
     vals = np.array([float(principles.get(k, 0.0)) for k in order], dtype=float)
     if vals.size == 0:
         return 0.0
+    if weights:
+        w = np.array([float(weights.get(k, 1.0)) for k in order], dtype=float)
+        w = np.clip(w, 1e-8, None)
+        return float(np.clip(np.sum(vals * w) / np.sum(w), 0.0, 1.0))
     return float(np.clip(vals.mean(), 0.0, 1.0))
 
 
@@ -716,15 +698,33 @@ def build_principles_viz(principles: dict[str, float], figsize=(10,5)):
     labels = ["repetition","gradation","symmetry","balance","harmony",
               "contrast","proportion","rhythm","simplicity","unity"]
     vals = [float(principles.get(k, 0.0)) for k in labels]
+
     fig = plt.figure(figsize=figsize)
-    ax = fig.add_subplot(111)
-    ax.bar(labels, vals)
+    ax = fig.add_subplot(1,1,1)
+    ax.bar(range(len(labels)), vals)
     ax.set_ylim(0, 1.0)
     ax.set_ylabel("Score (0–1)")
+    ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_title("Ten Principles of Beauty")
     fig.tight_layout()
     return fig_to_pil(fig, dpi=300)
+
+#---- show image 
+def show_img(col_like, img, caption):
+    if img is None:
+        (col_like if hasattr(col_like, "info") else st).info(f"{caption} (not available)")
+        return
+    if not isinstance(img, Image.Image):
+        try:
+            img = Image.fromarray(np.array(img))
+        except Exception:
+            (col_like if hasattr(col_like, "warning") else st).warning(f"Could not render: {caption}")
+            return
+    try:
+        col_like.image(img, caption=caption, use_container_width=True)
+    except TypeError:
+        col_like.image(img, caption=caption, use_container_width=True)
 
 # ---------------- Simple heuristic component detection ----------------
 COMPONENT_QUERIES = ["window","arch"]  # heuristic guessers
@@ -1493,6 +1493,8 @@ def make_report(
     chart_explanation_text: Optional[str] = None,
     principles_img: Optional[Image.Image] = None,        # <-- NEW
     principles_scores: Optional[dict] = None,            # <-- NEW
+    overall_img: Optional[Image.Image] = None,          # <-- NEW
+    overall_score: Optional[float] = None,               # <-- NEW
 ):
 
     import io, re, time as _t
@@ -1704,6 +1706,21 @@ def make_report(
                 c.drawString(LM, y, f"{k.capitalize()}: {float(v):.2f}")
                 y -= 12
 
+    #--line chart overall beauty line
+        # Overall beauty line (if provided)
+    if overall_img is not None:
+        if y < BOT + 200:
+            c.showPage(); y = H - TOP
+            c.setFont("STSong-Light", 12)
+            c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
+            y -= 8
+        _ = draw_img_fit_top(overall_img, LM, y, W - LM - RM)
+        w_px, h_px = overall_img.size
+        y -= (W - LM - RM) * (h_px / float(w_px)) + 10
+        if overall_score is not None:
+            c.setFont("Helvetica", 10)
+            c.drawString(LM, y, f"Overall Facade Beauty (0–1): {overall_score:.2f}")
+            y -= 14
 
     # Chart Explanation
     if chart_explanation_text:
@@ -1936,8 +1953,9 @@ if uploaded:
             interiors=(used_card.get("interiors") if used_card else None),
             chart_explanation_text=chart_explanation,    # <-- pass it here
             principles_img=principles_img,                 # <-- NEW
-            principles_scores=principles                   # <-- NEW
-
+            principles_scores=principles,                   # <-- NEW
+            overall_img=overall_img,                     # <-- NEW
+            overall_score=overall_beauty              # <-- NEW
             )
         if not isinstance(pdf_bytes, (bytes, bytearray)):
             st.error("PDF generation failed. No binary data returned.")            
