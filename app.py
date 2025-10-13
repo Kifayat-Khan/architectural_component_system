@@ -364,7 +364,7 @@ if page == "Analysis":
         t5_tok = AutoTokenizer.from_pretrained(LLM_MODEL_ID)
         t5 = AutoModelForSeq2SeqLM.from_pretrained(
             LLM_MODEL_ID,
-            torch_dtype=torch.float16 if device in ("cuda", "mps") else torch.float32
+            dtype=torch.float16 if device in ("cuda", "mps") else torch.float32
         ).to(device).eval()
 
         # CLIP
@@ -375,7 +375,7 @@ if page == "Analysis":
         zh_tok = AutoTokenizer.from_pretrained(TRANS_MODEL_ID)
         zh_mt = AutoModelForSeq2SeqLM.from_pretrained(
             TRANS_MODEL_ID,
-            torch_dtype=torch.float16 if device in ("cuda", "mps") else torch.float32
+            dtype=torch.float16 if device in ("cuda", "mps") else torch.float32
         ).to(device).eval()
         #---load
         device = str(next(t5.parameters()).device)
@@ -2150,16 +2150,36 @@ if page == "Analysis":
                 overall_img=overall_img,                     # <-- NEW
                 overall_score=overall_beauty              # <-- NEW
                 )
-            if not isinstance(pdf_bytes, (bytes, bytearray)):
-                st.error("PDF generation failed. No binary data returned.")            
-            else:
+            # after you've produced pdf_bytes (cached or in session_state):
+            st.session_state["last_pdf"] = pdf_bytes
+            st.session_state["last_name"] = Path(up.name).stem
+
+            import streamlit as st
+
+            @st.fragment
+            def download_block():
                 st.download_button(
-                    label="Download report PDF / 下載報告 PDF",
-                    data=pdf_bytes,
-                    file_name=Path(up.name).stem + "_report.pdf",
+                    "Download report PDF / 下載報告 PDF",
+                    data=st.session_state["last_pdf"],
+                    file_name=st.session_state["last_name"] + "_report.pdf",
                     mime="application/pdf",
-                    key=f"dl-{Path(up.name).stem}"
+                    key=f"dl-{st.session_state['last_name']}"
                 )
+
+            download_block()
+
+
+
+            # if not isinstance(pdf_bytes, (bytes, bytearray)):
+            #     st.error("PDF generation failed. No binary data returned.")            
+            # else:
+            #     st.download_button(
+            #         label="Download report PDF / 下載報告 PDF",
+            #         data=pdf_bytes,
+            #         file_name=Path(up.name).stem + "_report.pdf",
+            #         mime="application/pdf",
+            #         key=f"dl-{Path(up.name).stem}"
+            #     )
 
                 
 
