@@ -1876,52 +1876,6 @@ if page == "Analysis":
             w_px, h_px = viz_img.size
             y -= (W - LM - RM) * (h_px / float(w_px)) + 16
         
-            # Ten Principles page (image + compact list)
-        if principles_img is not None or principles_scores is not None:
-            if y < BOT + 280:
-                c.showPage(); y = H - TOP
-            c.setFont("STSong-Light", 12)
-            c.drawString(LM, y, "Ten Principles of Beauty / 十大美学原则")
-            y -= 8
-            if principles_img is not None:
-                _ = draw_img_fit_top(principles_img, LM, y, W - LM - RM)
-                w_px, h_px = principles_img.size
-                y -= (W - LM - RM) * (h_px / float(w_px)) + 12
-            if principles_scores:
-                c.setFont("Helvetica", 10)
-                items = ["repetition","gradation","symmetry","balance","harmony",
-                        "contrast","proportion","rhythm","simplicity","unity"]
-                for k in items:
-                    v = principles_scores.get(k)
-                    if v is None: continue
-                    if y < BOT:
-                        c.showPage(); y = H - TOP; c.setFont("Helvetica", 10)
-                    c.drawString(LM, y, f"{k.capitalize()}: {float(v):.2f}")
-                    y -= 12
-
-        #--line chart overall beauty line
-            # Overall beauty line (if provided)
-        if overall_img is not None:
-            if y < BOT + 200:
-                c.showPage(); y = H - TOP
-                c.setFont("STSong-Light", 12)
-                c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
-                y -= 8
-            _ = draw_img_fit_top(overall_img, LM, y, W - LM - RM)
-            w_px, h_px = overall_img.size
-            y -= (W - LM - RM) * (h_px / float(w_px)) + 10
-            if overall_score is not None:
-                c.setFont("Helvetica", 10)
-                c.drawString(LM, y, f"Overall Facade Beauty (0–1): {overall_score:.2f}")
-                y -= 14
-
-        # Chart Explanation
-        if chart_explanation_text:
-            if y < BOT + 120:
-                c.showPage(); y = H - TOP
-                c.setFont("STSong-Light", 12)
-                c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
-                y -= 8
             c.setFont("STSong-Light", 12)
             c.drawString(LM, y, "Explanation / 解释")
             y -= 14
@@ -1937,6 +1891,53 @@ if page == "Analysis":
                     c.drawString(LM, y, ln)
                     y -= leading
                 y -= int(leading * 0.5)
+        
+            # Ten Principles page (image + compact list)
+        if principles_img is not None or principles_scores is not None:
+            if y < BOT + 280:
+                c.showPage(); y = H - TOP
+            c.setFont("STSong-Light", 12)
+            c.drawString(LM, y, "Ten Principles of Beauty / 十大美学原则")
+            y -= 8
+            if principles_img is not None:
+                _ = draw_img_fit_top(principles_img, LM, y, W - LM - RM)
+                w_px, h_px = principles_img.size
+                y -= (W - LM - RM) * (h_px / float(w_px)) + 12
+            # if principles_scores:
+            #     c.setFont("Helvetica", 10)
+            #     items = ["repetition","gradation","symmetry","balance","harmony",
+            #             "contrast","proportion","rhythm","simplicity","unity"]
+            #     for k in items:
+            #         v = principles_scores.get(k)
+            #         if v is None: continue
+            #         if y < BOT:
+            #             c.showPage(); y = H - TOP; c.setFont("Helvetica", 10)
+            #         c.drawString(LM, y, f"{k.capitalize()}: {float(v):.2f}")
+            #         y -= 12
+
+        #--line chart overall beauty line
+            # Overall beauty line (if provided)
+        if overall_img is not None:
+            if y < BOT + 200:
+                c.showPage(); y = H - TOP
+                c.setFont("STSong-Light", 12)
+                c.drawString(LM, y, "Over All Beauty / 一切美丽")
+                y -= 8
+            _ = draw_img_fit_top(overall_img, LM, y, W - LM - RM)
+            w_px, h_px = overall_img.size
+            y -= (W - LM - RM) * (h_px / float(w_px)) + 10
+            if overall_score is not None:
+                c.setFont("Helvetica", 10)
+                c.drawString(LM, y, f"Overall Facade Beauty (0–1): {overall_score:.2f}")
+                y -= 14
+
+        # # Chart Explanation
+        # if chart_explanation_text:
+        #     if y < BOT + 120:
+        #         c.showPage(); y = H - TOP
+        #         c.setFont("STSong-Light", 12)
+        #         c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
+        #         y -= 8
 
         # Ranking + metrics
         c.setFont("Helvetica", 11)
@@ -1947,12 +1948,12 @@ if page == "Analysis":
         except Exception:
             pass
 
-        c.setFont("Helvetica", 10)
-        for k, v in (metrics or {}).items():
-            if y < BOT:
-                c.showPage(); y = H - TOP; c.setFont("Helvetica", 10)
-            c.drawString(LM, y, f"{k}: {v}")
-            y -= 12
+        # c.setFont("Helvetica", 10)
+        # for k, v in (metrics or {}).items():
+        #     if y < BOT:
+        #         c.showPage(); y = H - TOP; c.setFont("Helvetica", 10)
+        #     c.drawString(LM, y, f"{k}: {v}")
+        #     y -= 12
 
         c.showPage()
         c.save()
@@ -2112,6 +2113,8 @@ if page == "Analysis":
                 #---explianing of chart
             with st.spinner("Explaining the chart..."):
                 chart_explanation = explain_aesthetic_viz(metrics_dict, norms, clip_score, lang=LANG)
+                st.markdown("#### Explanation / 解释")
+                st.markdown(chart_explanation)
 
             # 10 prinical
             st.markdown("### Ten Principles of Beauty / 十大美学原则")
@@ -2129,8 +2132,7 @@ if page == "Analysis":
             st.info(f"Overall Beauty (0–1): **{overall_beauty:.2f}**")
             #---10 prn end 
 
-            st.markdown("#### Explanation / 解释")
-            st.markdown(chart_explanation)
+
 
             # Ranking
             rank, N, perc = update_and_rank(clip_score, Path(up.name).stem, HIST_PATH)
