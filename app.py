@@ -1036,13 +1036,14 @@ if page == "Analysis":
         nfr = np.exp(-((fractal - 1.4) ** 2) / (2 * 0.15 ** 2))
         return [float(v) for v in (nv, nr, nrx, nww, nry, nfr)]
 
-    def fig_to_pil(fig, dpi=400):
+    def fig_to_pil(fig, dpi=120):
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0.1,
-                    facecolor="white", edgecolor="none",
-                    pil_kwargs={"optimize": False, "compress_level": 0})
-        plt.close(fig); buf.seek(0)
+                    facecolor="white", edgecolor="none")
+        plt.close(fig)
+        buf.seek(0)
         return Image.open(buf).convert("RGB")
+
 
     def build_aesthetic_viz(norms, final, clip, figsize=(18,7)):
         labels = ["Vert Sym", "Rot Sym", "Proportion", "Win/Wall", "Rhythm", "Fractal"]
@@ -1697,7 +1698,8 @@ if page == "Analysis":
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.cidfonts import UnicodeCIDFont
         from PIL import Image
-
+        from reportlab import rl_config
+        rl_config.defaultCompression = 1
         # ensure CJK font available
         try:
             pdfmetrics.getFont("STSong-Light")
@@ -1706,25 +1708,28 @@ if page == "Analysis":
 
         buf = io.BytesIO()
         c = canvas.Canvas(buf, pagesize=A4)
+        c.setPageCompression(1)
         W, H = A4
         TOP, BOT, LM, RM = 40, 50, 40, 40
         y = H - TOP
 
-        def draw_img_fit_top(pil, x_left, y_top, max_w):
-            if pil is None:
-                return 0.0
-            try:
-                w_px, h_px = pil.size
-            except Exception:
-                return 0.0
-            if w_px <= 0 or h_px <= 0:
-                return 0.0
-            w = float(max_w)
-            h = w * (h_px / float(w_px))
-            c.drawImage(ImageReader(pil), x_left, y_top - h, width=w, height=h,
-                        preserveAspectRatio=True, mask='auto')
-            return h
+        def _pil_to_jpeg_bytes(pil_img, target_width_pt, dpi=150, quality=80):
+            target_px = max(1, int(target_width_pt * dpi / 72.0))
+            img = pil_img.convert("RGB").copy()
+            img.thumbnail((target_px, target_px * 10000), Image.LANCZOS)
+            bio = io.BytesIO()
+            img.save(bio, format="JPEG", quality=quality, optimize=True, subsampling=1)
+            return bio.getvalue()
 
+        def draw_img_fit_top(pil, x_left, y_top, max_w_pt):
+            if pil is None: return 0.0
+            jpeg = _pil_to_jpeg_bytes(pil, target_width_pt=max_w_pt, dpi=150, quality=80)
+            rdr = ImageReader(io.BytesIO(jpeg))
+            img = Image.open(io.BytesIO(jpeg))
+            w_draw = float(max_w_pt)
+            h_draw = w_draw * (img.height / float(img.width))
+            c.drawImage(rdr, x_left, y_top - h_draw, width=w_draw, height=h_draw, preserveAspectRatio=True, mask='auto')
+            return h_draw
         def wrap_lines(text, max_width_pt, font_name, font_size, is_cjk=False):
             sw = pdfmetrics.stringWidth
             lines = []
