@@ -9,3 +9,9 @@ pip install -U streamlit pillow numpy scikit-image matplotlib reportlab opencv-p
             transformers accelerate sentencepiece safetensors torch
 
 streamlit run app.py
+
+
+new 
+pip install -U transformers accelerate sentencepiece safetensors torch torchvision
+
+pip install -U bitsandbytes optimum
