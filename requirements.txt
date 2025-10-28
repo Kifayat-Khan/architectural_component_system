@@ -10,3 +10,4 @@ accelerate
 sentencepiece
 safetensors
 torch
+torchvision
