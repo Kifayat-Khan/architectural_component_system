@@ -5,7 +5,7 @@
 # Deps:
 # pip install -U streamlit pillow numpy scikit-image matplotlib reportlab \
 #   opencv-python-headless requests
-
+import os
 import io, re, math, time, json, hashlib, random, urllib.parse
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -36,7 +36,7 @@ NUM_THREADS     = 4
 MAX_SIDE        = 1024
 CACHE_TTL_MIN   = 240
 API_BASE        = "https://text.pollinations.ai"   # free text endpoint
-API_MODEL       = "openai"                         # openai-compatible text model name
+API_MODEL       = "gpt-4o-mini"                    # not used directly; Pollinations picks model
 KEY_NS          = "acs_v3p"                        # widget key namespace
 
 REINDEX_IF_EMPTY = True
@@ -69,6 +69,26 @@ IDX_PATH   = DATA_DIR / "index_lab.npz"           # lightweight index
 Path("outputs").mkdir(exist_ok=True)
 HIST_PATH = Path("outputs/history.json")
 
+
+def load_index(index_npz: str) -> Tuple[List[str], List[str], List[str], np.ndarray, str]:
+    index_npz = str(index_npz)
+    if not Path(index_npz).exists():
+        # ids, facade_ids, img_paths, vecs, cards_path
+        return [], [], [], np.zeros((0, 96), np.float32), str(CARDS_PATH)
+    try:
+        data = np.load(index_npz, allow_pickle=True)
+        vecs = data["vecs"]
+        cards_path = str(data["cards_path"])
+
+        # Backward compatible
+        ids = list(data["ids"]) if "ids" in data else []
+        facade_ids = list(data["facade_ids"]) if "facade_ids" in data else ids
+        img_paths = list(data["img_paths"]) if "img_paths" in data else []
+
+        return ids, facade_ids, img_paths, vecs, cards_path
+    except Exception:
+        return [], [], [], np.zeros((0, 96), np.float32), str(CARDS_PATH)
+
 # ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("Settings")
@@ -87,6 +107,16 @@ with st.sidebar:
         index=0,
         key=f"{KEY_NS}_page"
     )
+with st.sidebar.expander("Debug: index status"):
+    try:
+        ids, facade_ids, img_paths, vecs, cards_path = load_index(str(IDX_PATH))
+        st.write(f"Vectors: {vecs.shape[0]}")
+        st.write(f"Unique facades: {len(set(facade_ids))}")
+        # show a few sample rows
+        for i in range(min(5, len(ids))):
+            st.caption(f"{facade_ids[i]} -> {img_paths[i]}")
+    except Exception as e:
+        st.error(f"Index error: {e}")
 
 # ---------- DB I/O ----------
 def load_cards_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -110,39 +140,11 @@ def load_cards_jsonl(path: str) -> List[Dict[str, Any]]:
         raise ValueError("Incomplete JSON object at end of file")
     return cards
 
-def build_index(cards_path: str, index_npz: str) -> None:
-    cards_path = str(cards_path); index_npz = str(index_npz)
-    if not Path(cards_path).exists():
-        _empty_index(index_npz, cards_path); return
-    try:
-        cards = load_cards_jsonl(cards_path)
-    except Exception:
-        _empty_index(index_npz, cards_path); return
-    if not cards:
-        _empty_index(index_npz, cards_path); return
-
-    vecs, ids = [], []
-    for c in cards:
-        img_path = c.get("image")
-        if not img_path or not Path(img_path).exists(): continue
-        rgb = _read_image_rgb(img_path)
-        if rgb is None: continue
-        v = _lab_hist_descriptor(_resize_max_side(rgb, 720))
-        vecs.append(v); ids.append(c.get("id", str(int(time.time()))))
-
-    if not vecs:
-        _empty_index(index_npz, cards_path); return
-
-    arr = np.stack(vecs, axis=0).astype(np.float32)
-    np.savez(index_npz, ids=np.array(ids, dtype=object), vecs=arr, cards_path=str(cards_path))
-
-
 def _read_image_rgb(path: str):
     try:
         return cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
     except Exception:
         return None
-
 
 def _resize_max_side(img: np.ndarray, max_side: int = 720) -> np.ndarray:
     h, w = img.shape[:2]
@@ -161,6 +163,79 @@ def _lab_hist_descriptor(img_rgb: np.ndarray, bins: int = 32) -> np.ndarray:
     v /= (np.linalg.norm(v) + 1e-8)
     return v
 
+def _empty_index(index_npz: str, cards_path: str, dim: int = 96) -> None:
+    Path(index_npz).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        index_npz,
+        ids=np.array([], dtype=object),
+        facade_ids=np.array([], dtype=object),
+        img_paths=np.array([], dtype=object),
+        vecs=np.zeros((0, dim), dtype=np.float32),
+        cards_path=str(cards_path),
+    )
+
+def build_index(cards_path: str, index_npz: str) -> None:
+    cards_path = str(cards_path)
+    index_npz = str(index_npz)
+
+    if not Path(cards_path).exists():
+        _empty_index(index_npz, cards_path)
+        return
+
+    try:
+        cards = load_cards_jsonl(cards_path)
+    except Exception:
+        _empty_index(index_npz, cards_path)
+        return
+
+    if not cards:
+        _empty_index(index_npz, cards_path)
+        return
+
+    vecs, ids, facade_ids, img_paths = [], [], [], []
+
+    for c in cards:
+        f_id = c.get("id")
+        if not f_id:
+            continue
+
+        # new schema: list of images
+        imgs = c.get("images") or []
+
+        # optional legacy fallback if some cards still have "image"
+        if not imgs and c.get("image"):
+            imgs = [c["image"]]
+
+        for p in imgs:
+            if not p:
+                continue
+            if not Path(p).exists():
+                continue
+            rgb = _read_image_rgb(p)
+            if rgb is None:
+                continue
+
+            v = _lab_hist_descriptor(_resize_max_side(rgb, 720))
+
+            vecs.append(v)
+            ids.append(f"{f_id}::{Path(p).name}")  # per-image id
+            facade_ids.append(f_id)
+            img_paths.append(p)
+
+    if not vecs:
+        _empty_index(index_npz, cards_path)
+        return
+
+    arr = np.stack(vecs, axis=0).astype(np.float32)
+    np.savez(
+        index_npz,
+        ids=np.array(ids, dtype=object),
+        facade_ids=np.array(facade_ids, dtype=object),
+        img_paths=np.array(img_paths, dtype=object),
+        vecs=arr,
+        cards_path=str(cards_path),
+    )
+
 def ensure_index(cards_path: str, index_npz: str) -> None:
     """Rebuild index if missing, empty, or pointing at a different cards file."""
     try:
@@ -173,6 +248,21 @@ def ensure_index(cards_path: str, index_npz: str) -> None:
     except Exception:
         build_index(cards_path, index_npz)
 
+# --- helpers: image -> data URL (for multimodal chat) ---
+import base64
+
+def _bytes_to_data_url(raw_bytes: bytes, mime: str = "image/jpeg") -> str:
+    try:
+        # ensure JPEG for size + compat
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True, subsampling=1)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        # fallback: still try to pass what we have
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        return f"data:{mime};base64,{b64}"
 
 def _make_info(card: dict) -> str:
     parts = []
@@ -208,7 +298,7 @@ def _db_labels(lang: str) -> dict:
         "history":     _t_en_zh("History / Notes", "历史 / 备注", lang),
         "materials":   _t_en_zh("Materials (comma-separated)", "材料（以英文逗号分隔）", lang),
         "elements":    _t_en_zh("Elements (comma-separated)", "要素（以英文逗号分隔）", lang),
-        "upload":      _t_en_zh("Upload main facade image", "上传立面主图", lang),
+        "upload":      _t_en_zh("Upload main facade image(s)", "上传立面主图（可多张）", lang),
         "add_btn":     _t_en_zh("Add to Database", "添加到数据库", lang),
         "err_name":    _t_en_zh("Name is required.", "请填写名称。", lang),
         "indexing":    _t_en_zh("Indexing (lightweight)…", "正在建立索引（轻量）…", lang),
@@ -234,24 +324,40 @@ if page == "Database Manager":
     history   = st.text_area(LBL["history"],    height=80, key=f"{KEY_NS}_dm_hist")
     materials = st.text_input(LBL["materials"], key=f"{KEY_NS}_dm_mat")
     elements  = st.text_input(LBL["elements"],  key=f"{KEY_NS}_dm_elem")
-    image_file= st.file_uploader(LBL["upload"], type=["jpg","jpeg","png"], key=f"{KEY_NS}_dm_up")
+    image_file= st.file_uploader(
+        LBL["upload"],
+        type=["jpg","jpeg","png"],
+        key=f"{KEY_NS}_dm_up",
+        accept_multiple_files=True  # supports multi-view facades
+    )
 
     if image_file and st.button(LBL["add_btn"], key=f"{KEY_NS}_dm_add"):
         if not name:
             st.error(LBL["err_name"])
         else:
-            img_path = DATA_DIR / f"{name.replace(' ', '_')}.jpg"
-            Image.open(image_file).convert("RGB").save(img_path)
+            # create card id first
+            card_id = str(int(time.time()))
+            img_dir = DATA_DIR / card_id
+            img_dir.mkdir(parents=True, exist_ok=True)
+
+            image_paths = []
+            for idx, up in enumerate(image_file, start=1):
+                pil_img = Image.open(up).convert("RGB")
+                out_path = img_dir / f"img_{idx:03d}.jpg"
+                pil_img.save(out_path)
+                image_paths.append(str(out_path))
+
             card = {
-                "id": str(int(time.time())),
+                "id": card_id,
                 "name": name, "location": location, "era": era, "style": style,
                 "massing": massing, "structure": structure, "condition": condition,
                 "intro": intro, "history": history,
                 "materials": [m.strip() for m in materials.split(",") if m.strip()],
                 "elements": [e.strip() for e in elements.split(",") if e.strip()],
-                "image": str(img_path)
+                "images": image_paths,  # multi-view
             }
             card["info"] = _make_info(card)
+
             with open(CARDS_PATH, "a", encoding="utf-8") as f:
                 f.write(json.dumps(card, ensure_ascii=False) + "\n")
 
@@ -259,8 +365,8 @@ if page == "Database Manager":
                 build_index(str(CARDS_PATH), str(IDX_PATH))
 
             st.success(LBL["added_ok"].format(name=name))
-    st.stop()  # don't run analysis on this page
 
+    st.stop()  # don't run analysis on this page
 # =========================
 # app.py — PART 2 of 3
 # =========================
@@ -283,25 +389,7 @@ def show_img(col_like, img, caption):
 
 # ---------- Lightweight indexing (LAB histogram) + ORB verification ----------
 
-
-
-
-def _empty_index(index_npz: str, cards_path: str, dim: int = 96) -> None:
-    Path(index_npz).parent.mkdir(parents=True, exist_ok=True)
-    np.savez(index_npz, ids=np.array([], dtype=object),
-             vecs=np.zeros((0, dim), dtype=np.float32),
-             cards_path=str(cards_path))
-
-
-def load_index(index_npz: str) -> Tuple[List[str], np.ndarray, str]:
-    index_npz = str(index_npz)
-    if not Path(index_npz).exists():
-        return [], np.zeros((0, 96), np.float32), str(CARDS_PATH)
-    try:
-        data = np.load(index_npz, allow_pickle=True)
-        return list(data["ids"]), data["vecs"], str(data["cards_path"])
-    except Exception:
-        return [], np.zeros((0, 96), np.float32), str(CARDS_PATH)
+COLOR_MAP = {"window": (46, 204, 113), "arch": (241, 196, 15)}
 
 def orb_inlier_ratio(query_path: str, cand_path: str, max_side: int = 720) -> float:
     q = _read_image_rgb(query_path); c = _read_image_rgb(cand_path)
@@ -324,84 +412,6 @@ def orb_inlier_ratio(query_path: str, cand_path: str, max_side: int = 720) -> fl
     denom = max(1, min(len(kq), len(kc)))
     return float(inliers) / float(denom)
 
-def retrieve_verified(
-    image_path: str,
-    index_npz: str,
-    base_threshold: float = 0.30,   # slightly lower: allow ORB to decide
-    margin: float = 0.05,
-    inlier_floor: float = 0.05,
-    inlier_strong: float = 0.18,
-    alpha: float = 0.85,
-    k: int = 6,
-) -> Tuple[Optional[Dict[str, Any]], float, Dict[str, float]]:
-    ids, vecs, cards_path = load_index(index_npz)
-    if vecs.shape[0] == 0:
-        return None, 0.0, {"reason": "empty_index"}
-
-    # query descriptor
-    qrgb = _read_image_rgb(image_path)
-    if qrgb is None:
-        return None, 0.0, {"reason": "bad_query_image"}
-    q = _lab_hist_descriptor(_resize_max_side(qrgb, 720))
-
-    sims = vecs @ q
-    top_idx = np.argsort(-sims)[:max(1, k)]
-    cards = load_cards_jsonl(cards_path)
-    id2card = {c.get("id"): c for c in cards if c.get("id")}
-
-    # group by (name, location) to avoid duplicates of same building
-    def _key(c: dict) -> str:
-        nm = (c.get("name") or "").strip().lower()
-        loc = (c.get("location") or "").strip().lower()
-        return f"{nm}|||{loc}"
-
-    grouped = {}
-    for i in top_idx:
-        cid = ids[i]
-        card = id2card.get(cid)
-        if not card:
-            continue
-        key = _key(card)
-        s = float(sims[i])
-        if key not in grouped or s > grouped[key]["score"]:
-            grouped[key] = {"card": card, "score": s}
-
-    if not grouped:
-        return None, 0.0, {"reason": "no_candidates_after_group"}
-
-    uniq = sorted(grouped.values(), key=lambda x: -x["score"])
-    s1 = uniq[0]["score"]
-    s2 = uniq[1]["score"] if len(uniq) > 1 else -1.0
-    best_card = uniq[0]["card"]
-
-    n_unique = len(uniq)
-    dyn_margin = min(max(0.02, margin * (0.6 if n_unique < 4 else 1.0)), 0.12 * (1.0 - s1) + 0.03)
-
-    if s1 < base_threshold:
-        return None, s1, {"reason": "below_threshold", "s1": s1, "thr": base_threshold}
-
-    cand_img_path = best_card.get("image")
-    if not cand_img_path or not Path(cand_img_path).exists():
-        return None, s1, {"reason": "missing_candidate_image", "s1": s1}
-
-    inliers = orb_inlier_ratio(image_path, cand_img_path)
-    if inliers >= inlier_strong:
-        combined = alpha * s1 + (1.0 - alpha) * inliers
-        return best_card, combined, {"reason": "ok_strong_orb", "s1": s1, "s2": s2, "inliers": inliers, "combined": combined, "dyn_margin": dyn_margin, "n_unique": n_unique}
-
-    if s2 >= 0 and (s1 - s2) < dyn_margin:
-        return None, s1, {"reason": "low_margin", "s1": s1, "s2": s2, "dyn_margin": dyn_margin, "inliers": inliers, "n_unique": n_unique}
-
-    if inliers < inlier_floor:
-        return None, s1, {"reason": "low_inliers", "s1": s1, "inliers": inliers, "floor": inlier_floor, "n_unique": n_unique}
-
-    combined = alpha * s1 + (1.0 - alpha) * inliers
-    return best_card, combined, {"reason": "ok", "s1": s1, "s2": s2, "inliers": inliers, "combined": combined, "dyn_margin": dyn_margin, "n_unique": n_unique}
-
-
-
-# ---------- heuristic components ----------
-COLOR_MAP = {"window": (46, 204, 113), "arch": (241, 196, 15)}
 def nms_boxes(dets, iou_thr=0.30):
     if not dets:
         return []
@@ -460,6 +470,89 @@ def draw_semantic_overlay(pil_img, dets, alpha=0.35):
         draw.rectangle([x1,y1,x2,y2], fill=(color[0], color[1], color[2], int(255*alpha)))
         draw.rectangle([x1,y1,x2,y2], outline=(color[0], color[1], color[2], 255), width=2)
     return Image.alpha_composite(base, overlay).convert("RGB")
+
+def retrieve_verified_multiview(
+    image_path: str,
+    index_npz: str,
+    base_threshold: float = 0.28,
+    inlier_floor: float = 0.05,
+    inlier_strong: float = 0.14,
+    alpha: float = 0.80,
+    k_per_facade: int = 3,
+    k_global: int = 30,
+) -> Tuple[Optional[Dict[str, Any]], float, Dict[str, Any]]:
+    ids, facade_ids, img_paths, vecs, cards_path = load_index(index_npz)
+    if vecs.shape[0] == 0:
+        return None, 0.0, {"reason": "empty_index"}
+
+    # query descriptor
+    qrgb = _read_image_rgb(image_path)
+    if qrgb is None:
+        return None, 0.0, {"reason": "bad_query_image"}
+
+    q = _lab_hist_descriptor(_resize_max_side(qrgb, 720))
+    sims = vecs @ q
+    if sims.size == 0:
+        return None, 0.0, {"reason": "no_vectors"}
+
+    # take top-k images globally
+    top_idx = np.argsort(-sims)[:max(1, k_global)]
+
+    # group candidate images by facade
+    buckets: Dict[str, List[int]] = {}
+    for i in top_idx:
+        f = facade_ids[i]
+        buckets.setdefault(f, []).append(i)
+
+    # keep only the best few images per facade
+    for f in list(buckets.keys()):
+        idxs = buckets[f]
+        idxs_sorted = sorted(idxs, key=lambda j: float(sims[j]), reverse=True)
+        buckets[f] = idxs_sorted[:k_per_facade]
+
+    best_f = None
+    best_combined = 0.0
+    best_dbg: Dict[str, Any] = {"reason": "no_verified"}
+
+    for f, idxs in buckets.items():
+        for j in idxs:
+            s = float(sims[j])
+            if s < base_threshold:
+                continue
+
+            cand_path = img_paths[j]
+            inl = orb_inlier_ratio(image_path, cand_path)
+
+            if inl < inlier_floor:
+                continue
+
+            combined = alpha * s + (1.0 - alpha) * inl
+
+            # require at least some minimum inlier or good sim
+            if combined > best_combined and (inl >= inlier_strong or s >= base_threshold):
+                best_f = f
+                best_combined = combined
+                best_dbg = {
+                    "reason": "ok",
+                    "facade_id": f,
+                    "img_path": cand_path,
+                    "s": s,
+                    "inliers": inl,
+                    "combined": combined,
+                }
+
+    if best_f is None:
+        return None, float(np.max(sims)), best_dbg
+
+    # load card by best facade id
+    cards = load_cards_jsonl(cards_path)
+    id2card = {c.get("id"): c for c in cards if c.get("id")}
+    card = id2card.get(best_f)
+    if not card:
+        best_dbg["reason"] = "missing_card"
+        return None, best_combined, best_dbg
+
+    return card, best_combined, best_dbg
 
 # ---------- metrics & viz ----------
 def compute_symmetry_scores(pil_img):
@@ -560,30 +653,80 @@ def _lab(pil_img):
     return L, a, b
 
 def principle_harmony(pil_img):
+    """
+    Harmony = how smoothly the color mood changes across the facade.
+    If different vertical slices have very different chroma, harmony drops.
+    """
     L, a, b = _lab(pil_img)
     H, W = L.shape
     cols = 6
     widths = np.array_split(np.arange(W), cols)
+
     slice_means = []
     for idx in widths:
-        if idx.size == 0: continue
-        aa = a[:, idx].mean(); bb = b[:, idx].mean()
+        if idx.size == 0:
+            continue
+        aa = a[:, idx].mean()
+        bb = b[:, idx].mean()
         slice_means.append([aa, bb])
-    slice_means = np.array(slice_means) if slice_means else np.zeros((1,2))
-    disp = float(np.linalg.norm(slice_means - slice_means.mean(axis=0), axis=1).mean())
-    return float(np.clip(1.0 - _safe_norm01(disp, 2.0, 12.0), 0, 1))
+
+    slice_means = np.array(slice_means) if slice_means else np.zeros((1, 2), dtype=np.float32)
+
+    # Average distance of slices from the overall mean in (a,b) space
+    disp = float(
+        np.linalg.norm(slice_means - slice_means.mean(axis=0), axis=1).mean()
+    )
+
+    # Typical facades sit somewhere in ~[4, 25] in this distance.
+    # 0 => perfectly uniform color; very large => patchy / clashing.
+    harmony = 1.0 - _safe_norm01(disp, 4.0, 25.0)
+    return float(np.clip(harmony, 0.0, 1.0))
+
+
 
 def principle_contrast(pil_img):
-    L, _, _ = _lab(pil_img)
+    """
+    Contrast = mix of global light–dark spread and local texture.
+    Tuned so most facade photos fall somewhere in the middle,
+    instead of saturating at 1.0.
+    """
+    L, _, _ = _lab(pil_img)           # L in 0–255 from OpenCV Lab
+    L = L.astype(np.float32) / 255.0  # work in 0–1
+
+    # 1) global contrast (how wide the brightness range is)
     rms = float(L.std())
-    tex = float(cv2.Laplacian(L, cv2.CV_32F, ksize=3).var()**0.5)
-    raw = 0.6 * _safe_norm01(rms, 5.0, 35.0) + 0.4 * _safe_norm01(tex, 2.0, 25.0)
-    return float(np.clip(raw, 0, 1))
+
+    # 2) local texture contrast (edges / fine detail)
+    lap = cv2.Laplacian(L, cv2.CV_32F, ksize=3)
+    tex = float(lap.std())
+
+    # Map into 0–1 but with softer ranges so we don't always hit 1.0
+    rms_norm = _safe_norm01(rms, 0.03, 0.20)   # 3%–20% std
+    tex_norm = _safe_norm01(tex, 0.01, 0.10)   # small–medium texture
+
+    # Smooth compression so very strong contrast doesn't all become 1.0
+    rms_smooth = float(np.tanh(2.0 * rms_norm))
+    tex_smooth = float(np.tanh(2.0 * tex_norm))
+
+    raw = 0.6 * rms_smooth + 0.4 * tex_smooth
+    return float(np.clip(raw, 0.0, 1.0))
+
 
 def principle_proportion(aspect_ratio, w2w):
-    ar_term = np.exp(-((aspect_ratio - 1.5)**2)/(2*0.4**2))
-    wwr_term = np.exp(-((w2w - 0.22)**2)/(2*0.12**2))
-    return float(np.clip(0.6*ar_term + 0.4*wwr_term, 0, 1))
+    """
+    Proportion = mix of whole–facade shape (height/width)
+    and window-to-wall ratio. We prefer comfortable, mid-range
+    values instead of a single “perfect” golden value.
+    """
+    # Typical facades: H/W roughly 0.7–2.5
+    # Reward moderate verticality around ~1.6, but not too sharply.
+    ar_term = np.exp(-((aspect_ratio - 1.6) ** 2) / (2 * 0.50 ** 2))
+
+    # Window-to-wall: we like a comfortable middle band ~0.18–0.35
+    wwr_term = np.exp(-((w2w - 0.26) ** 2) / (2 * 0.14 ** 2))
+
+    score = 0.5 * ar_term + 0.5 * wwr_term
+    return float(np.clip(score, 0.0, 1.0))
 
 def _column_autocorr(signal):
     sig = signal - signal.mean()
@@ -597,34 +740,71 @@ def _column_autocorr(signal):
     return float(max(0.0, ac[k]))
 
 def principle_rhythm(pil_img):
+    """
+    Rhythm = how strongly the facade suggests repeated bays / beats.
+    Combines a frequency-domain measure and column auto-correlation.
+    """
     g = rgb2gray(np.array(pil_img))
     edges = sobel(g)
+
+    # Frequency energy on a mid-distance ring (repetition scale)
     F = np.fft.fftshift(np.fft.fft2(edges))
     mag = np.log1p(np.abs(F))
-    center = np.array(mag.shape)/2
+    center = np.array(mag.shape) / 2.0
     ys, xs = np.indices(mag.shape)
-    r = np.hypot(xs-center[1], ys-center[0])
-    ring = (r>20) & (r<120)
-    fft_term = float(np.quantile(mag[ring], 0.98) / (np.mean(mag[ring]) + 1e-6)) if ring.sum() else 0.0
-    fft_term = float(np.clip(fft_term/4.0, 0, 1))
-    e = cv2.Canny((g*255).astype(np.uint8), 80, 180).astype(np.float32)
+    r = np.hypot(xs - center[1], ys - center[0])
+    ring = (r > 20) & (r < 120)
+
+    if ring.sum() == 0:
+        fft_raw = 0.0
+    else:
+        fft_raw = float(np.quantile(mag[ring], 0.98) / (np.mean(mag[ring]) + 1e-6))
+
+    # Map raw FFT measure into 0–1 with a softer range
+    fft_norm = _safe_norm01(fft_raw, 0.8, 3.0)
+
+    # Column auto-correlation of edge density
+    e = cv2.Canny((g * 255).astype(np.uint8), 80, 180).astype(np.float32)
     col_sig = e.sum(axis=0)
     ac = _column_autocorr(col_sig)
-    ac_term = float(np.clip(ac, 0, 1))
-    return float(np.clip(0.6*fft_term + 0.4*ac_term, 0, 1))
+    ac_norm = _safe_norm01(ac, 0.15, 0.85)
+
+    score = 0.6 * fft_norm + 0.4 * ac_norm
+    return float(np.clip(score, 0.0, 1.0))
+
+
 
 def principle_repetition(pil_img):
     return principle_rhythm(pil_img)
 
 def principle_simplicity(pil_img):
-    _, e = _edge_map(pil_img)
-    density = float(e.mean())
-    hist, _ = np.histogram(e, bins=16, range=(0,255), density=True)
-    p = hist + 1e-8; p /= p.sum()
-    entropy = float(-(p*np.log(p)).sum())
-    d_term = 1.0 - _safe_norm01(density*255.0, 5.0, 35.0)
-    h_term = 1.0 - _safe_norm01(entropy, 1.0, 2.8)
-    return float(np.clip(0.6*d_term + 0.4*h_term, 0, 1))
+    """
+    Simplicity = fewer edges + less “busy” edge distribution.
+    High simplicity means the facade reads clean and calm.
+    """
+    _, e = _edge_map(pil_img)  # Canny edges, values 0 or 255
+
+    # Fraction of pixels that are edges (0–1)
+    edge_fraction = float((e > 0).mean())
+
+    # Entropy of edge distribution: higher = more complex/busy
+    hist, _ = np.histogram(e, bins=16, range=(0, 255), density=True)
+    p = hist + 1e-8
+    p /= p.sum()
+    entropy = float(-(p * np.log(p)).sum())
+
+    # We want: small edge_fraction => high simplicity.
+    # Typical facades maybe 3%–40% pixels as edges.
+    d_term = 1.0 - _safe_norm01(edge_fraction, 0.03, 0.40)
+
+    # And lower entropy => higher simplicity.
+    # For binary-ish edges, entropy is usually in ~[0.2, 1.5].
+    h_term = 1.0 - _safe_norm01(entropy, 0.2, 1.5)
+
+    score = 0.6 * d_term + 0.4 * h_term
+    return float(np.clip(score, 0.0, 1.0))
+
+
 
 def principle_unity(pil_img, dets):
     L, a, b = _lab(pil_img); H, W = L.shape
@@ -719,32 +899,33 @@ def build_overall_beauty_line(score: float, figsize=(10, 4), lang: str = "en") -
     fig.tight_layout()
     return fig_to_pil(fig, dpi=300)
 
-def build_aesthetic_viz(norms, final, clip_like, figsize=(18,7)):
+def build_aesthetic_viz(norms, composite_index_0_5, figsize=(8, 6)):
+    """
+    Only show the radar chart of 6 core features (0–1).
+    The overall index is already shown elsewhere, so we don't draw a second bar here.
+    """
     labels = ["Vert Sym", "Rot Sym", "Proportion", "Win/Wall", "Rhythm", "Fractal"]
+
+    # close the radar polygon
     vals = norms + [norms[0]]
-    angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False)
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False)
     angles = np.concatenate([angles, angles[:1]])
 
     fig = plt.figure(figsize=figsize)
-    ax1 = plt.subplot(1,2,1, polar=True)
-    ax1.plot(angles, vals, linewidth=3)
-    ax1.fill(angles, vals, alpha=0.30)
-    ax1.set_xticks(np.linspace(0, 2*np.pi, len(labels), endpoint=False))
-    ax1.set_xticklabels(labels, fontsize=12)
-    ax1.set_ylim(0,1)
-    ax1.grid(True, linewidth=0.8)
-    ax1.set_title("Aesthetic feature profile (0–1)", fontsize=13)
+    ax = plt.subplot(1, 1, 1, polar=True)
 
-    ax2 = plt.subplot(1,2,2)
-    ax2.grid(axis="x", linewidth=0.5)
-    ax2.barh(["Composite index (0–5)"], [float(clip_like)], height=0.6)
-    ax2.set_xlabel("Contribution")
-    ax2.set_xlim(0, max(6.0, float(clip_like) + 0.5))
-    ax2.tick_params(labelsize=12)
-    ax2.set_title("Score makeup", fontsize=13)
+    ax.plot(angles, vals, linewidth=3)
+    ax.fill(angles, vals, alpha=0.30)
+    ax.set_xticks(np.linspace(0, 2 * np.pi, len(labels), endpoint=False))
+    ax.set_xticklabels(labels, fontsize=12)
+    ax.set_ylim(0, 1)
+    ax.grid(True, linewidth=0.8)
+    ax.set_title("Aesthetic feature profile (0–1)", fontsize=13)
 
     fig.tight_layout()
     return fig_to_pil(fig, dpi=300)
+
+
 
 def normalize_features(sym_v, sym_r, ratio, w2w, rhythm, fractal):
     nv  = np.clip((sym_v - 0.6) / 0.4, 0, 1)
@@ -756,88 +937,343 @@ def normalize_features(sym_v, sym_r, ratio, w2w, rhythm, fractal):
     return [float(v) for v in (nv, nr, nrx, nww, nry, nfr)]
 
 # ---------- Pollinations client (text only) ----------
-def _pollinations_chat(user_text: str, system_text: str = "", model: str = API_MODEL, json_mode: bool = False) -> str:
-    payload = {
-        "messages": [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": user_text}
-        ],
-        "model": model,
-        "seed": random.randint(1, 999_999_999),
-        "jsonMode": bool(json_mode),
-        "private": True,
-        "stream": False
-    }
+def _pollinations_chat(
+    prompt: str,
+    system_text: str | None = None,
+    image_data_url: str | None = None,
+    *,
+    model: str | None = None,         # accepted but intentionally unused
+    timeout_s: float = 30.0,
+    api_base: str = "https://text.pollinations.ai",
+    **_
+) -> str:
+    """
+    Pollinations client aligned with their docs:
+
+    - Advanced: POST https://text.pollinations.ai/
+      Sends system + user as OpenAI-style messages, no explicit model.
+    - Simple fallback: GET https://text.pollinations.ai/{prompt}
+
+    No local LLM; all text comes from Pollinations.
+    """
+    import requests
+    from urllib.parse import quote
+
+    # ---- Build prompt, including image ref if any ----
+    if image_data_url:
+        prompt = (
+            "You are given an image reference below. Use it in your analysis.\n"
+            f"[IMAGE]: {image_data_url}\n\n{prompt}"
+        )
+
+    def _truncate(s: str | None, hard: int) -> str:
+        if not s:
+            return ""
+        return (s[:hard] + " …[truncated]") if len(s) > hard else s
+
+    user_text   = _truncate(prompt, 3500) 
+    system_text = _truncate(system_text, 800)
+
+    last_err = None
+
+    # ---------- 1) Advanced: POST https://text.pollinations.ai/ ----------
     try:
-        r = requests.post(API_BASE, json=payload, timeout=60)
+        url = api_base.rstrip("/") + "/"
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_text or ""},
+                {"role": "user",   "content": user_text or ""},
+            ]
+        }
+        # Do NOT send "model" – let Pollinations choose a default.
+
+        r = requests.post(
+            url,
+            json=payload,
+            timeout=timeout_s,
+            headers={"accept": "text/plain"}  # ask for plain text
+        )
+
         if r.status_code == 200:
-            return r.text.strip()
-        return f"(Pollinations error {r.status_code})"
+            ct = (r.headers.get("content-type") or "").lower()
+            txt = (r.text or "").strip()
+
+            # If server gives us plain text, just return it
+            if txt and (ct.startswith("text/") or not ct):
+                return txt
+
+            # If JSON, try to extract a string-ish field
+            try:
+                js = r.json()
+                if isinstance(js, str):
+                    return js.strip()
+                for k in ("response", "text", "output", "message"):
+                    v = js.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+            except Exception:
+                pass
+
+            last_err = f"unexpected POST body (ct={ct}, len={len(r.text)})"
+        else:
+            last_err = f"POST / status {r.status_code}: {r.text[:200]}"
     except Exception as e:
-        return f"(Pollinations exception: {e})"
+        last_err = f"POST / exception: {e}"
+
+    # ---------- 2) Simple fallback: GET https://text.pollinations.ai/{prompt} ----------
+    try:
+        # Combine system + user into one prompt for the simple GET API
+        full_prompt = (
+            (f"System:\n{system_text}\n\nUser:\n{user_text}")
+            if system_text else user_text
+        ) or ""
+
+        url = f"{api_base.rstrip('/')}/{quote(full_prompt)}"
+        r = requests.get(
+            url,
+            timeout=timeout_s,
+            headers={"accept": "text/plain"}
+        )
+        txt = (r.text or "").strip()
+
+        if r.status_code == 200 and txt:
+            low = txt.lstrip().lower()
+            # If the body is HTML (e.g. a docs page), don’t dump it into UI
+            if low.startswith("<!doctype html") or low.startswith("<html"):
+                return "(Pollinations error: received HTML instead of plain text)"
+            return txt
+
+        return f"(Pollinations error {r.status_code}: {txt[:200]})"
+    except Exception as e:
+        return f"(Pollinations exception: {e}; last error: {last_err})"
+
+# ---------- small JSON helper for safe-sized prompts ----------
+def _safe_json(obj: dict, max_chars: int = 8000) -> str:
+    s = json.dumps(obj, ensure_ascii=False, indent=2)
+    return s if len(s) <= max_chars else (s[:max_chars] + " …[truncated]")
 
 # ---------- Narrative & Chart explanation via Pollinations ----------
 def compose_metrics_context(metrics: Dict[str, Any], dets: list) -> str:
+    """Compact, human-readable summary of metrics (no big JSON)."""
     win_count = sum(1 for d in dets if d.get("label") == "window")
     arch_count = sum(1 for d in dets if d.get("label") == "arch")
-    ctx = {
-        "vertical_symmetry": metrics.get("symmetry_vertical"),
-        "rotational_symmetry": metrics.get("symmetry_rotational"),
-        "facade_ratio_H_over_W": metrics.get("facade_ratio_H_W"),
-        "window_to_wall_ratio": metrics.get("window_to_wall_ratio"),
-        "rhythm_fft_peak": metrics.get("rhythm_fft_peak"),
-        "fractal_dimension": metrics.get("fractal_dimension"),
-        "windows_detected": win_count,
-        "arches_detected": arch_count,
-        "ten_principles": {k.replace("principle_",""): float(v) for k,v in metrics.items() if k.startswith("principle_")}
-    }
-    return json.dumps(ctx, ensure_ascii=False, indent=2)
 
-def generate_facade_narrative_pollinations(metrics: Dict[str, Any], dets: list, lang: str = "en", db_info: Optional[str] = None) -> str:
+    # Core numeric metrics
+    vs  = metrics.get("symmetry_vertical")
+    rs  = metrics.get("symmetry_rotational")
+    ratio = metrics.get("facade_ratio_H_W")
+    w2w = metrics.get("window_to_wall_ratio")
+    rhy = metrics.get("rhythm_fft_peak")
+    fr  = metrics.get("fractal_dimension")
+
+    # Ten principles: only top 3 and bottom 2
+    ten = {k.replace("principle_", ""): float(v)
+           for k, v in metrics.items() if k.startswith("principle_")}
+    sorted_ten = sorted(ten.items(), key=lambda x: x[1], reverse=True)
+    top3 = sorted_ten[:3]
+    low2 = sorted_ten[-2:] if len(sorted_ten) >= 2 else []
+
+    lines = []
+    lines.append(
+        "Core metrics: "
+        f"vertical_symmetry={vs:.3f}, "
+        f"rotational_symmetry={rs:.3f}, "
+        f"facade_ratio_H_W={ratio:.3f}, "
+        f"window_to_wall_ratio={w2w:.3f}, "
+        f"rhythm_index={rhy:.3f}, "
+        f"fractal_dimension={fr:.3f}."
+    )
+    lines.append(
+        f"Detected components: windows={win_count}, arches={arch_count}."
+    )
+
+    if top3:
+        lines.append(
+            "Ten principles – strongest: " +
+            ", ".join(f"{k}({v:.2f})" for k, v in top3) + "."
+        )
+    if low2:
+        lines.append(
+            "Ten principles – weakest: " +
+            ", ".join(f"{k}({v:.2f})" for k, v in low2) + "."
+        )
+
+    return "\n".join(lines)
+
+def generate_facade_narrative_pollinations(
+    metrics: Dict[str, Any],
+    dets: list,
+    lang: str = "en",
+    db_info: Optional[str] = None,
+    image_data_url: Optional[str] = None  # kept for signature, NOT used
+) -> str:
+    """
+    Generate a tourist-friendly facade narrative that is STRICTLY grounded
+    in db_info + high-level metrics. We do NOT send the image to avoid the
+    model recognizing famous landmarks and ignoring the DB.
+    """
+    # --- DB facts block (ensure it's never empty) ---
+    db_text = (db_info or "").strip()
+    if not db_text:
+        db_text = (
+            "No database facts are available. You must NOT invent a specific "
+            "building name, location, or detailed history."
+        )
+
+    # Short metrics context (we allow numbers here, but tell the model not to repeat them)
     ctx = compose_metrics_context(metrics, dets)
-    sys = "You are an architectural critic. Be precise, visual, and professional."
+
     if lang == "zh":
-        sys = "你是一名建筑评论家。请语言准确、具象、专业，用简体中文回答。"
+        system_text = (
+            "你是一位在城市中为游客讲解的资深建筑师兼导览员。"
+            "风格：专业、清晰、有教学性，但不要像论文。\n"
+            "【硬性规则】\n"
+            "1. 你只能根据 [建筑事实] 中提供的信息来给出具体描述。"
+            "   不得编造新的建筑名称、城市、年代、设计师、用途或材料。\n"
+            "2. 如果 [建筑事实] 中有建筑名称，你必须使用该名称；如果没有，只能称为“这座建筑”或“该建筑”。\n"
+            "3. 不要使用“欢迎大家”“今天我要介绍”等开场问候，也不要说“如图所示”“这张图片里”。\n"
+            "4. [立面指标概况] 只用于帮助你判断：例如“比较对称 / 不太对称”“窗洞偏多 / 偏少”“节奏感强 / 较弱”。"
+            "   不要在答案中写出任何具体数字。\n"
+            "5. 只描述立面和紧邻的室外空间，不要描述室内。"
+        )
 
-    db_block = ""
-    if db_info:
-        # Firm rule: facts from DB must be integrated; no inventions.
-        if lang == "zh":
-            db_block = f"\n\n【已知事实（来自数据库，必须遵循）】\n{db_info}\n\n"
-        else:
-            db_block = f"\n\n[KNOWN FACTS from DB — you MUST respect them and do not invent details]\n{db_info}\n\n"
+        user_prompt = (
+            "下面是这座建筑可用的事实信息：\n"
+            f"[建筑事实]\n{db_text}\n\n"
+            "下面是立面指标的简要概况（包含数字，只供你内部参考，回答时不要写出具体数字）：\n"
+            f"[立面指标概况]\n{ctx}\n\n"
+            "任务：写出 3 段面向游客和学生的导览讲解：\n"
+            "第 1 段：基于 [建筑事实] 介绍建筑的名称、所在城市/区域、年代和风格，如果有 intro 或 history，"
+            "请用 1–2 句提到至少一个具体事实（例如设计者、开放年份、改造背景等）。\n"
+            "第 2 段：结合风格、体量（massing）、[建筑事实] 中列出的材料和要素，再加上 [立面指标概况]，"
+            "说明立面的组织方式：大致是否对称、窗洞大致多还是少、节奏感和重复感如何、整体感觉偏开放还是扎实。\n"
+            "第 3 段：从游客和学生的角度，总结站在这座建筑前可以学到哪些建筑概念，例如对称、节奏、比例、"
+            "城市地标性、历史与当代的叠加或再利用等。\n"
+            "注意：不要使用任何欢迎语，不要提到“图像、照片、这张图”等字眼。"
+        )
 
-    prompt = (
-        f"{db_block}"
-        f"Use ONLY the observed metrics/components (and the KNOWN FACTS if present) to write a 3-paragraph architectural critique.\n"
-        f"Metrics JSON:\n{ctx}\n\n"
-        f"Paragraph 1: composition, form, massing, how the facade occupies space.\n"
-        f"Paragraph 2: organization — symmetry/asymmetry, rhythm, repetition, proportions, openings/materials implied.\n"
-        f"Paragraph 3: atmosphere & aesthetic impression — light, texture, detail, perception.\n"
-        f"Rules: No meta language (e.g., 'this image shows'), no surroundings/interiors, no invented history. If a detail is not in KNOWN FACTS, do not assert it as fact."
+    else:
+        system_text = (
+            "You are a senior architect and on-site tour guide explaining a facade "
+            "to tourists and students. Tone: calm, clear, and educational.\n"
+            "HARD RULES:\n"
+            "1. You may ONLY use concrete facts that appear in the [FACTS] block. "
+            "   Do NOT invent a different building name, city, year, architect, use, or materials.\n"
+            "2. If [FACTS] contains a building name, you MUST use that exact name. "
+            "   If it does not, refer only to “this building” or “the building”.\n"
+            "3. Do NOT greet the audience (no “Welcome, everyone”, “Today I will introduce”, etc.).\n"
+            "4. Do NOT mention images, photos, or slides.\n"
+            "5. The [METRICS] block is only for internal guidance. You may use it to say things like "
+            "   “reads as fairly symmetrical” or “window area feels generous”, but you MUST NOT quote "
+            "   the raw numbers or write approximate values like “0.84” or “63%”.\n"
+            "6. Talk only about the facade and immediate exterior, not the interior."
+        )
+
+        user_prompt = (
+            "Here are the factual building details you MUST treat as true:\n"
+            f"[FACTS]\n{db_text}\n\n"
+            "Here is a compact description of facade metrics, with numbers. "
+            "These are only for your internal reasoning – do NOT repeat the numbers in your answer:\n"
+            f"[METRICS]\n{ctx}\n\n"
+            "Now, using ONLY the information in [FACTS] plus high-level impressions from [METRICS], "
+            "write exactly three paragraphs:\n"
+            "Paragraph 1 – Tourist context: introduce the building using the DB facts: name (if present), "
+            "location in Taichung, era/period, main use, and style. If intro/history contain a designer, "
+            "opening year, or reuse story, include at least one such concrete detail in this paragraph.\n"
+            "Paragraph 2 – How the facade is organized: using style, massing, the listed materials/elements in [FACTS], "
+            "and only qualitative cues from [METRICS], explain the composition: sense of symmetry or freedom, "
+            "strength of rhythm and repetition, and whether the facade feels more open or solid.\n"
+            "Paragraph 3 – Educational takeaway: explain what visitors or students can learn from this facade "
+            "about architectural ideas like symmetry, rhythm, proportion, adaptive reuse, or the role of contemporary "
+            "design in the city.\n"
+            "Remember: do NOT introduce any new factual data that is not supported by [FACTS]."
+        )
+
+    return _pollinations_chat(
+        user_prompt,
+        system_text=system_text,
+        image_data_url=None,   # IMPORTANT: no image for narrative
+        api_base=API_BASE,
     )
-    return _pollinations_chat(prompt, system_text=sys)
 
+ 
+def chart_explainer_pollinations(
+    metrics: Dict[str, Any],
+    lang: str = "en",
+    db_info: Optional[str] = None,
+    image_data_url: Optional[str] = None  # kept for signature, NOT used
+) -> str:
+    """
+    Explain the chart in simple language for tourists and kids.
+    No raw numbers in the answer; we still send numbers in the prompt
+    but clearly tell the model not to repeat them.
+    """
+    db_text = (db_info or "").strip()
+    if not db_text:
+        db_text = "No building database facts are available. Keep the explanation very general."
 
-def chart_explainer_pollinations(metrics: Dict[str, Any], lang: str = "en") -> str:
-    sys = "You explain charts succinctly for architects."
+    ctx = compose_metrics_context(metrics, dets=[])
+
     if lang == "zh":
-        sys = "你是一名为建筑师简洁解释图表的讲解者。请用简体中文。"
-    prompt = (
-        "You are given normalized aesthetic metrics extracted from a facade image.\n"
-        f"Metrics JSON:\n{json.dumps(metrics, ensure_ascii=False, indent=2)}\n\n"
-        "Write 5–7 concise bullet points (each starting with '- ') explaining the chart implications: relative levels, balance, trends, repetition, dominant peaks/gaps. "
-        "Do NOT quote exact numbers. Keep it practical and insight-driven."
-    )
-    return _pollinations_chat(prompt, system_text=sys)
+        system_text = (
+            "你是一位在博物馆里讲解建筑图表的老师，听众包括家庭游客和小学生。\n"
+            "要求：\n"
+            "1. 语言非常简单、口语化，每条尽量 1–2 句。\n"
+            "2. 不要在回答中写出任何数字或百分比，也不要用“指数、FFT、分形”等术语。\n"
+            "3. 不要编造新的建筑名称或历史，只能在 [建筑事实] 的范围内概括。\n"
+            "4. 每一点都要告诉孩子和游客：可以看立面的哪一部分来观察这个特点。"
+        )
 
-# ---------- text-only fallback (kept for resilience) ----------
+        user_prompt = (
+            "【建筑事实】\n"
+            f"{db_text}\n\n"
+            "【立面指标概况】（包含数字，只给你参考，请不要在回答中写出数字）\n"
+            f"{ctx}\n\n"
+            "请写出 4–6 条项目，每条用 “- ” 开头。\n"
+            "每条：\n"
+            "• 概括一个简单的观察点（例如：左右看起来比较平衡、窗户排成有规律的节奏、立面比较简单、细节比较丰富等）。\n"
+            "• 加一句很短的提示，让游客/孩子知道应该看哪里（比如“看看两边的窗户是不是差不多高”）。"
+        )
+
+    else:
+        system_text = (
+            "You are a museum educator explaining a simple facade score chart to families and children.\n"
+            "Rules:\n"
+            "1. Use very simple words and short sentences.\n"
+            "2. Do NOT show any numbers or percentages in your answer.\n"
+            "3. Do NOT use technical terms like 'index', 'FFT', or 'fractal'.\n"
+            "4. Stay consistent with the building facts and do not invent a new name or history.\n"
+            "5. Each bullet should say what people can actually look at on the facade."
+        )
+
+        user_prompt = (
+            "Here are the building facts you should keep in mind:\n"
+            f"[FACTS]\n{db_text}\n\n"
+            "Here is a compact metrics summary with numbers (for your understanding only; "
+            "DO NOT repeat the numbers in your answer):\n"
+            f"[METRICS]\n{ctx}\n\n"
+            "Write 4–6 short bullet points, each starting with '- ':\n"
+            "• Each bullet explains ONE simple idea, such as 'the two sides feel balanced', "
+            "'windows repeat in a clear pattern', 'the facade feels calm and simple', "
+            "or 'there are many small details to explore'.\n"
+            "• For each bullet, add a tiny suggestion of what kids and visitors can look at "
+            "on the building to notice this.\n"
+            "• Do NOT include any numbers or percentages."
+        )
+
+    return _pollinations_chat(
+        user_prompt,
+        system_text=system_text,
+        image_data_url=None,   # IMPORTANT: no image here either
+        api_base=API_BASE,
+    )
+
+# ---------- text-only fallback (simple & kid-friendly) ----------
 def chart_explainer_text_only(metrics: Dict[str, Any], lang="en") -> str:
-    def lvl(x, lo, hi):
-        if x is None: return "mid"
-        r = (x - lo) / (hi - lo + 1e-6)
-        return "low" if r < 0.33 else ("high" if r > 0.67 else "mid")
-
+    """
+    Local fallback: still explain for general users / kids.
+    No formulas, just intuitive language.
+    """
     vs  = metrics.get("symmetry_vertical", 0.5)
     rs  = metrics.get("symmetry_rotational", 0.5)
     prop = metrics.get("facade_ratio_H_W", 1.5)
@@ -845,25 +1281,116 @@ def chart_explainer_text_only(metrics: Dict[str, Any], lang="en") -> str:
     rhy = metrics.get("rhythm_fft_peak", 1.0)
     fr  = metrics.get("fractal_dimension", 1.4)
 
-    bullets_en = [
-        f"- Left-right symmetry is {lvl(vs, 0.4, 0.85)}; the order feels {'balanced' if vs>=0.65 else 'relaxed'}.",
-        f"- Rotational symmetry reads {lvl(rs, 0.35, 0.8)}, affecting perceived centering.",
-        f"- Aspect (H/W≈{prop:.2f}) suggests a {'slender vertical' if prop>1.9 else ('grounded horizontal' if prop<1.1 else 'balanced')} stance.",
-        f"- Window-to-wall ratio is {lvl(w2w, 0.08, 0.45)}, implying a {'transparent' if w2w>0.45 else ('solid' if w2w<0.10 else 'comfortable')} facade.",
-        f"- Repetition strength is {lvl(rhy, 0.6, 2.4)}; bays {'read clearly' if rhy>=1.2 else 'are softer and less pronounced'}.",
-        f"- Detail across scales is {lvl(fr, 1.2, 1.6)}, trending {'ornate' if fr>=1.55 else ('plain' if fr<=1.25 else 'measured')}."
-    ]
+    # helper levels
+    def level(x, lo, hi):
+        if x <= lo: return "low"
+        if x >= hi: return "high"
+        return "mid"
+
+    lev_sym = level(vs, 0.45, 0.75)
+    lev_prop = level(prop, 1.1, 1.9)
+    lev_w2w = level(w2w, 0.10, 0.40)
+    lev_rhy = level(rhy, 0.7, 2.0)
+    lev_detail = level(fr, 1.25, 1.55)
+
+    bullets_en = []
+
+    # Symmetry / balance
+    if lev_sym == "high":
+        bullets_en.append(
+            "- The two sides of the facade feel very similar, so the building looks calm and stable. "
+            "You can notice this by comparing the left and right sides: windows and shapes line up in a similar way."
+        )
+    elif lev_sym == "low":
+        bullets_en.append(
+            "- The two sides of the facade are quite different, which makes it feel more playful and irregular. "
+            "You can look for details that change from one side to the other."
+        )
+    else:
+        bullets_en.append(
+            "- The facade is somewhat balanced: the two sides are not exactly the same, but they do not feel random either. "
+            "Look at the main opening or center line and see how the parts on each side relate."
+        )
+
+    # Proportion (tall vs wide)
+    if lev_prop == "high":
+        bullets_en.append(
+            "- The building looks tall and slim, so your eyes are gently pulled upward. "
+            "Try tracing the outline of the building from bottom to top."
+        )
+    elif lev_prop == "low":
+        bullets_en.append(
+            "- The building looks wider than it is tall, so it feels very grounded and stable. "
+            "You can feel this by looking at how long the facade stretches from left to right."
+        )
+    else:
+        bullets_en.append(
+            "- The building feels quite balanced between tall and wide. "
+            "It doesn’t stretch too far in either direction, which gives a comfortable overall shape."
+        )
+
+    # Openness (window-to-wall)
+    if lev_w2w == "high":
+        bullets_en.append(
+            "- There is a lot of window area compared to wall, so the facade feels bright and open. "
+            "Count how many window surfaces you see compared with solid wall parts."
+        )
+    elif lev_w2w == "low":
+        bullets_en.append(
+            "- There is more solid wall than window, so the facade feels heavier and more closed. "
+            "Notice how much plain wall you see between the openings."
+        )
+    else:
+        bullets_en.append(
+            "- The amount of wall and window feels balanced, so the facade is neither too closed nor too open. "
+            "Look at how windows and solid wall pieces take turns."
+        )
+
+    # Rhythm / repetition
+    if lev_rhy == "high":
+        bullets_en.append(
+            "- There is a strong rhythm in the facade: many parts repeat again and again, like a beat in music. "
+            "You can see this by following rows or columns of windows and other repeating shapes."
+        )
+    elif lev_rhy == "low":
+        bullets_en.append(
+            "- The rhythm of the facade is soft, with fewer exact repeats. "
+            "Instead of perfect rows, look for gentle changes from one part to the next."
+        )
+    else:
+        bullets_en.append(
+            "- The facade has some repetition, but also some variety. "
+            "Notice how certain shapes come back, but not always in a strict pattern."
+        )
+
+    # Detail / complexity
+    if lev_detail == "high":
+        bullets_en.append(
+            "- There are many small details to discover, so the facade feels rich and busy. "
+            "If you stand close, you can keep finding new lines, edges, or decorations."
+        )
+    elif lev_detail == "low":
+        bullets_en.append(
+            "- The facade is quite simple, with fewer small details. "
+            "This makes it easy to understand the main shapes from far away."
+        )
+    else:
+        bullets_en.append(
+            "- The amount of detail is in the middle: not too plain, not too busy. "
+            "You can enjoy both the big outline and some smaller features when you look closer."
+        )
+
+    result_en = "\n".join(bullets_en)
+
     if lang == "zh":
-        # quick inline translation prompt through Pollinations
-        joined = "\n".join(bullets_en)
+        # Translate to Simplified Chinese while keeping list formatting
         zh = _pollinations_chat(
-            f"Translate to Simplified Chinese, keep list formatting:\n{joined}",
+            f"Translate to Simplified Chinese. Keep '- ' bullet formatting:\n{result_en}",
             system_text="You are a precise translator."
         )
         return zh
-    return "\n".join(bullets_en)
 
-
+    return result_en
 # =========================
 # app.py — PART 3 of 3
 # =========================
@@ -928,18 +1455,7 @@ def _cached_norms(sym_v, sym_r, ratio, w2w, rhythm, fractal):
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL_MIN*60)
 def _cached_viz(norms, composite_index_0_5):
-    return build_aesthetic_viz(norms, final=composite_index_0_5, clip_like=composite_index_0_5)
-
-@st.cache_data(show_spinner=False, ttl=CACHE_TTL_MIN*60)
-def _cached_pollinations_story(metrics: Dict[str,Any], dets: list, lang: str):
-    return generate_facade_narrative_pollinations(metrics, dets, lang=lang)
-
-@st.cache_data(show_spinner=False, ttl=CACHE_TTL_MIN*60)
-def _cached_pollinations_chart(metrics: Dict[str,Any], lang: str):
-    txt = chart_explainer_pollinations(metrics, lang=lang)
-    if not txt or "(Pollinations" in txt:
-        return chart_explainer_text_only(metrics, lang=lang)
-    return txt
+    return build_aesthetic_viz(norms, composite_index_0_5)
 
 # ---------- PDF builder ----------
 def make_report(
@@ -1153,6 +1669,7 @@ if page == "Analysis":
         for up in uploaded:
             st.subheader(up.name)
             raw = up.read()
+            img_data_url = _bytes_to_data_url(raw, mime="image/jpeg")
             up.seek(0)
 
             # 1) Components + overlay (cached)
@@ -1176,18 +1693,17 @@ if page == "Analysis":
 
             # UI render — always show original, overlay, heatmap as requested
             cols = st.columns(3)
-            cols[0].image(pil, caption="Original", use_container_width=True)
+            cols[0].image(pil, caption="Original", width='stretch')
 
             if SHOW_OVERLAY_UI and overlay is not None:
-                cols[1].image(overlay, caption="Semantic overlay (heuristic)", use_container_width=True)
+                cols[1].image(overlay, caption="Semantic overlay (heuristic)", width='stretch')
             else:
                 cols[1].empty()
 
             if SHOW_HEATMAP_UI and heat is not None:
-                cols[2].image(heat, caption="Explainability heatmap", use_container_width=True)
+                cols[2].image(heat, caption="Explainability heatmap", width='stretch')
             else:
                 cols[2].empty()
-
 
             # Metrics dict (for text + PDF)
             metrics_dict = {
@@ -1208,44 +1724,46 @@ if page == "Analysis":
             verified_card = None
             db_info = None
             try:
-                verified_card, combined, dbg = retrieve_verified(
-                    tmp_image_path, str(IDX_PATH),
-                    base_threshold=0.30, margin=0.05, inlier_floor=0.05, inlier_strong=0.18, alpha=0.85
+                verified_card, combined, dbg = retrieve_verified_multiview(
+                    tmp_image_path,
+                    str(IDX_PATH),
+                    base_threshold=0.30,
                 )
+
                 if verified_card:
-                    db_info = verified_card.get("info") or _make_info(verified_card)
-                    badge = f"DB match: **{verified_card.get('name','?')}**"
+                    db_info = _make_info(verified_card)
+                    st.caption(f"DB facts used for narrative: {db_info}")
+
+                    badge = f"DB match: **{verified_card.get('name', '?')}**"
                     sub = []
-                    if verified_card.get("location"): sub.append(verified_card["location"])
-                    if verified_card.get("era"): sub.append(verified_card["era"])
-                    if verified_card.get("style"): sub.append(verified_card["style"])
+                    if verified_card.get("location"):
+                        sub.append(verified_card["location"])
+                    if verified_card.get("era"):
+                        sub.append(verified_card["era"])
+                    if verified_card.get("style"):
+                        sub.append(verified_card["style"])
                     if sub:
                         badge += " — " + ", ".join(sub)
+                    # You can show this if you like:
                     # st.success(badge)
-                    # st.caption(
-                    #     f"(combined={dbg.get('combined',0):.3f}, s1={dbg.get('s1',0):.3f}, "
-                    #     f"inliers={dbg.get('inliers',0):.3f}, reason={dbg.get('reason','ok')})"
-                    # )
+
                 else:
-                    st.caption(f"No reliable DB match ({dbg.get('reason','?')}, s1={dbg.get('s1',0):.3f})")
-            except Exception as _e:
-                st.caption(f"DB match error: {_e}")
+                    st.caption(
+                        f"No reliable DB match ({dbg.get('reason', '?')}, "
+                        f"s1={dbg.get('s1', 0):.3f})"
+                    )
+            except Exception as e:
+                st.caption(f"DB match error: {e}")
 
-            # Narrative (Pollinations), now **grounded** when db_info is present
+            # Narrative (Pollinations), grounded when db_info is present
             with st.spinner("Generating facade narrative..."):
-                story = _cached_pollinations_story.__wrapped__(  # bypass cache to include db_info
-                    metrics_dict, dets, LANG
-                ) if db_info is None else generate_facade_narrative_pollinations(metrics_dict, dets, lang=LANG, db_info=db_info)
-
-
-            # add highlights from principles
-            top3 = sorted(principles.items(), key=lambda x: -x[1])[:3]
-            low2 = sorted(principles.items(), key=lambda x: x[1])[:2]
-            if LANG == "zh":
-                extra = f"\n\n美学要点：优势在 {', '.join([k for k,_ in top3])}；较弱在 {', '.join([k for k,_ in low2])}。"
-            else:
-                extra = f"\n\nAesthetic highlights: strengths in {', '.join([k for k,_ in top3])}; weaker in {', '.join([k for k,_ in low2])}."
-            story = (story or "").strip() + extra
+                story = generate_facade_narrative_pollinations(
+                    metrics_dict,
+                    dets,
+                    lang=LANG,
+                    db_info=db_info,
+                    image_data_url=img_data_url
+                )
 
             st.markdown("### Design Narrative / 設計敘事")
             st.write(story)
@@ -1255,7 +1773,14 @@ if page == "Analysis":
             st.image(viz_img, caption="Feature profile and score makeup",   width='stretch')
 
             with st.spinner("Explaining the chart..."):
-                chart_explanation = _cached_pollinations_chart(metrics_dict, lang=LANG)
+                chart_explanation = chart_explainer_pollinations(
+                    metrics_dict,
+                    lang=LANG,
+                    db_info=db_info,
+                    image_data_url=img_data_url
+                )
+                if not chart_explanation or "(Pollinations" in chart_explanation:
+                    chart_explanation = chart_explainer_text_only(metrics_dict, lang=LANG)
 
             st.markdown("#### Explanation / 解释")
             st.markdown(chart_explanation)
@@ -1275,17 +1800,33 @@ if page == "Analysis":
             # Ask (grounded) — only if matched
             st.markdown("### Ask / 问")
             qa_key = f"{KEY_NS}_qa_{Path(up.name).stem}"
-            user_q = st.text_input("Ask a question about this building" if LANG!="zh" else "请就此建筑提问", key=qa_key)
+            user_q = st.text_input(
+                "Ask a question about this building" if LANG != "zh" else "请就此建筑提问",
+                key=qa_key
+            )
+
             if user_q:
-                info_text = (verified_card or {}).get("info", "")
+                if verified_card:
+                    info_text = _make_info(verified_card)
+                else:
+                    info_text = ""
+
                 if info_text:
-                    # Answer using Pollinations with info-only constraint
                     sys = "Answer ONLY using the provided Information. If not present, reply EXACTLY: NOTFOUND."
                     if LANG == "zh":
                         sys = "仅根据提供的信息回答。如果信息中没有，请严格回复：NOTFOUND。"
-                    ans = _pollinations_chat(f"Information:\n{info_text}\n\nQuestion:\n{user_q}\nAnswer:", system_text=sys)
+
+                    ans = _pollinations_chat(
+                        f"Information:\n{info_text}\n\nQuestion:\n{user_q}\nAnswer:",
+                        system_text=sys
+                    )
+
                     if ans.strip().upper().startswith("NOTFOUND"):
-                        st.warning("Sorry, not found in the current building information." if LANG!="zh" else "抱歉，在当前建筑信息中未找到。")
+                        st.warning(
+                            "Sorry, not found in the current building information."
+                            if LANG != "zh" else
+                            "抱歉，在当前建筑信息中未找到。"
+                        )
                     else:
                         st.success(ans)
                 else:
