@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import cv2
 import streamlit as st
 import matplotlib
@@ -30,6 +30,14 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 
 import requests
+
+#--qr code imports
+import qrcode
+from qrcode.image.pil import PilImage
+
+
+
+
 
 # --------- Runtime knobs (variables; no env) ----------
 NUM_THREADS     = 4
@@ -54,8 +62,8 @@ pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
 pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
 # --- app title and state
-st.set_page_config(page_title="AI Analysis of Historic Architecture", layout="wide")
-st.title("AI Analysis of Historic Architecture / 历史建筑的人工智能分析")
+st.set_page_config(page_title="AI Analysis of Facade", layout="wide")
+st.title("AI Analysis of Facade / 立面人工智能分析")
 st.write("")
 if "flash" in st.session_state:
     st.success(st.session_state.pop("flash"))
@@ -68,6 +76,39 @@ CARDS_PATH = DATA_DIR / "buildings.jsonl"
 IDX_PATH   = DATA_DIR / "index_lab.npz"           # lightweight index
 Path("outputs").mkdir(exist_ok=True)
 HIST_PATH = Path("outputs/history.json")
+
+# Base URL of your deployed app (update this when you deploy)
+BASE_URL = "https://facade-analysis-system.zeabur.app/"
+
+QR_DIR = DATA_DIR / "qr"
+QR_DIR.mkdir(exist_ok=True)
+
+#---helper for qr code 
+def generate_qr_for_facade(facade_id: str) -> Tuple[str, str]:
+    """
+    Generate a QR code PNG for this facade id.
+
+    Returns:
+      (qr_image_path, qr_target_url)
+    """
+    # The URL that will open this facade via QR (you already handle this in your QR logic)
+    target = f"{APP_BASE_URL}/?facade_id={facade_id}"
+
+    # Save QR PNG under data/qr/{facade_id}.png
+    out_path = QR_DIR / f"{facade_id}.png"
+
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=8,
+        border=2,
+    )
+    qr.add_data(target)
+    qr.make(fit=True)
+    img: PilImage = qr.make_image(fill_color="black", back_color="white")
+    img.save(out_path)
+
+    return str(out_path), target
 
 
 def load_index(index_npz: str) -> Tuple[List[str], List[str], List[str], np.ndarray, str]:
@@ -248,6 +289,204 @@ def ensure_index(cards_path: str, index_npz: str) -> None:
     except Exception:
         build_index(cards_path, index_npz)
 
+#---search by name helper 
+def _norm_key(s: str) -> str:
+    """Normalize a search string / name for matching (works for English + Chinese)."""
+    if not isinstance(s, str):
+        return ""
+    s = s.strip().lower()
+    # remove normal and full-width spaces
+    s = s.replace(" ", "").replace("\u3000", "")
+    return s
+
+def card_matches_name_query(card: dict, query: str) -> bool:
+    q = _norm_key(query)
+    if not q:
+        return False
+
+    name_en = _norm_key(card.get("name", ""))
+    name_zh = _norm_key(card.get("name_zh", ""))
+
+    # allow partial matches
+    return (q in name_en) or (q in name_zh)
+
+#search by id helper 
+def _norm_id(s: str | None) -> str:
+    if not s:
+        return ""
+    return s.strip().lower()
+
+#----qr code helpers
+
+QR_DIR = DATA_DIR / "qr"
+QR_DIR.mkdir(exist_ok=True)
+
+def generate_qr_for_building(
+    card: dict,
+    base_url: str,
+    out_dir: Path = QR_DIR,
+) -> str:
+    import urllib.parse, qrcode
+    from PIL import Image, ImageDraw, ImageFont
+
+    b_id = str(card.get("id", "")).strip()
+    if not b_id:
+        return ""
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # URL the QR will open
+    target_url = f"{base_url.rstrip('/')}/?facade_id={urllib.parse.quote(b_id)}"
+
+    # --- 1) Base QR (slightly larger) ---
+    qr = qrcode.QRCode(version=1, box_size=12, border=4)
+    qr.add_data(target_url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    W, H = qr_img.size
+
+    # --- 2) Title text (EN / ZH) ---
+    name_en = (card.get("name") or "").strip()
+    name_zh = (card.get("name_zh") or "").strip()
+    if name_en and name_zh:
+        title = f"{name_en} / {name_zh}"
+    else:
+        title = name_en or name_zh
+
+    if not title:
+        out_path = out_dir / f"{b_id}_qr.png"
+        qr_img.save(out_path)
+        return str(out_path)
+
+    # --- helper to measure text without draw.textsize ---
+    def measure_text(draw_obj, text, font_obj):
+        try:
+            bbox = draw_obj.textbbox((0, 0), text, font=font_obj)
+            return bbox[2] - bbox[0], bbox[3] - bbox[1]
+        except Exception:
+            pass
+        try:
+            bbox = font_obj.getbbox(text)
+            return bbox[2] - bbox[0], bbox[3] - bbox[1]
+        except Exception:
+            pass
+        try:
+            return font_obj.getsize(text)
+        except Exception:
+            return (8 * len(text), 18)
+
+    # --- 3) Choose a reasonably large font ---
+    font = None
+    for fname in ["arial.ttf", "DejaVuSans.ttf"]:
+        try:
+            font = ImageFont.truetype(fname, 28)   # bigger size
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    title_band_height = 80  # more space for the text
+    temp_canvas = Image.new("RGB", (W, H + title_band_height), "white")
+    temp_draw = ImageDraw.Draw(temp_canvas)
+
+    text_w, text_h = measure_text(temp_draw, title, font)
+    max_width = W - 20
+
+    # Shrink font only if really necessary
+    while text_w > max_width and getattr(font, "size", None) and font.size > 16:
+        try:
+            font = ImageFont.truetype(font.path, font.size - 2)  # type: ignore[attr-defined]
+        except Exception:
+            break
+        text_w, text_h = measure_text(temp_draw, title, font)
+
+    # --- 4) Compose title + QR ---
+    canvas = Image.new("RGB", (W, H + title_band_height), "white")
+    draw = ImageDraw.Draw(canvas)
+
+    text_x = (W - text_w) // 2
+    text_y = (title_band_height - text_h) // 2
+    draw.text((text_x, text_y), title, fill="black", font=font)
+
+    canvas.paste(qr_img, (0, title_band_height))
+
+    # --- 5) Upscale for sharper text ---
+    scale = 2
+    big = canvas.resize((canvas.width * scale, canvas.height * scale), Image.LANCZOS)
+
+    out_path = out_dir / f"{b_id}_qr.png"
+    big.save(out_path)
+    return str(out_path)
+
+
+
+def generate_qr_guide_text(
+    db_info: str,
+    lang: str = "en",
+    image_data_url: Optional[str] = None
+) -> str:
+    """
+    Short, tourist-friendly explanation based ONLY on db_info.
+    Used for QR-code info page (no metrics, no image analysis).
+    """
+
+    if not db_info:
+        return "No detailed information is available for this building yet."
+
+    if lang == "zh":
+        system_text = (
+            "你是一位在台湾带团的建筑导览员，正在为游客介绍眼前的建筑。"
+            "语气要：亲切、清楚、具有教学性，但不要太学术，也不要太幼稚。\n"
+            "重要规则：\n"
+            "1. 只能根据提供的建筑信息来讲解，禁止编造新的具体事实（例如材料、年代、建筑师、用途等）。\n"
+            "2. 不要说“这张图片中你可以看到”“如图所示”等元话语，只假设游客正站在建筑前面。\n"
+            "3. 不要打招呼（不要用“大家好”“欢迎各位”之类）。\n"
+            "4. 用简单的中文说明建筑在哪里、属于什么年代/风格、有怎样的体量和立面特征，"
+            "以及它在城市或文化中的意义，适合普通游客和学生理解。"
+        )
+        prompt = (
+            "以下是数据库中的建筑信息，请你把它转化为现场导览用的说明文字：\n"
+            f"{db_info}\n\n"
+            "请写 2–3 小段简短文字：\n"
+            "第 1 段：介绍建筑的名称、位置、年代和大致用途，以及它为什么重要（例如是地标、文化据点、保存再利用等）。\n"
+            "第 2 段：用简单的词，帮游客“看懂”这个立面的主要特点，比如体量、材料、颜色、屋顶或立面构成方式，"
+            "以及和历史或当地生活的关系。\n"
+            "如有需要，可以加第 3 段，说明游客在这里可以学习到什么建筑或文化概念。"
+        )
+    else:
+        system_text = (
+            "You are a friendly on-site tour guide in Taichung, explaining a building to visitors. "
+            "Your tone is clear, calm, and educational – suitable for tourists and students.\n"
+            "Rules:\n"
+            "1. You MUST only use facts from the DB text. Do NOT invent extra details "
+            "about materials, dates, designers, height, or functions.\n"
+            "2. Do NOT mention images, photos, slides, or QR codes. Assume the visitor is "
+            "standing in front of the real building.\n"
+            "3. Do NOT start with greetings like 'Welcome' or 'Today I will introduce'. "
+            "Start directly with the building.\n"
+            "4. Use simple, accessible language. Explain what the place is, where it is, its era and style, "
+            "and why it matters for culture or history."
+        )
+        prompt = (
+            "Here is the building DB information:\n"
+            f"{db_info}\n\n"
+            "Turn this into a short on-site guide explanation.\n"
+            "Write 2–3 short paragraphs:\n"
+            "Paragraph 1: Introduce what the building is, where in Taichung it is, its era, style, "
+            "and why it is important (for example, a landmark, a preserved historic site, or a creative reuse).\n"
+            "Paragraph 2: Help visitors 'read' the facade in simple words – mention massing, key elements "
+            "(like murals, courtyards, roofs, arcades) that are listed in the DB, and how the place feels.\n"
+            "Optional Paragraph 3: Explain what tourists and students can learn here about architecture or local culture."
+        )
+
+    return _pollinations_chat(
+        prompt,
+        system_text=system_text,
+        image_data_url=image_data_url,
+        api_base=API_BASE,
+    )
+
 # --- helpers: image -> data URL (for multimodal chat) ---
 import base64
 
@@ -282,12 +521,15 @@ def _make_info(card: dict) -> str:
 def _t_en_zh(en: str, zh: str, lang: str) -> str:
     return zh if lang == "zh" else en
 
+def _t_en_zh(en: str, zh: str, lang: str) -> str:
+    return zh if lang == "zh" else en
+
 def _db_labels(lang: str) -> dict:
     return {
         "header":      _t_en_zh("📚 Building Database Manager", "📚 建筑数据库管理", lang),
         "info":        _t_en_zh("Add building entries for retrieval and grounding.",
                                 "添加建筑条目用于检索与叙事实据。", lang),
-        "name":        _t_en_zh("Building Name", "建筑名称", lang),
+        "name":        _t_en_zh("Building Name", "建筑名称", lang),          # ✅ THIS MUST EXIST
         "location":    _t_en_zh("Location (City, Area)", "位置（城市、区域）", lang),
         "era":         _t_en_zh("Era / Period", "时代 / 时期", lang),
         "style":       _t_en_zh("Style", "风格", lang),
@@ -306,6 +548,7 @@ def _db_labels(lang: str) -> dict:
                                 "已添加「{name}」并重建索引。", lang),
     }
 
+
 # ---------------- Database Manager ----------------
 if page == "Database Manager":
     LBL = _db_labels(LANG)
@@ -313,7 +556,16 @@ if page == "Database Manager":
     st.header(LBL["header"])
     st.info(LBL["info"])
 
-    name      = st.text_input(LBL["name"],      key=f"{KEY_NS}_dm_name")
+    # English + Chinese names
+    name_en  = st.text_input(
+        LBL["name"] + " (English)",
+        key=f"{KEY_NS}_dm_name_en"
+    )
+    name_zh  = st.text_input(
+        "建筑名称（中文，可选）" if LANG == "zh" else "Building Name (Chinese, optional)",
+        key=f"{KEY_NS}_dm_name_zh"
+    )
+
     location  = st.text_input(LBL["location"],  key=f"{KEY_NS}_dm_loc")
     era       = st.text_input(LBL["era"],       key=f"{KEY_NS}_dm_era")
     style     = st.text_input(LBL["style"],     key=f"{KEY_NS}_dm_style")
@@ -324,19 +576,22 @@ if page == "Database Manager":
     history   = st.text_area(LBL["history"],    height=80, key=f"{KEY_NS}_dm_hist")
     materials = st.text_input(LBL["materials"], key=f"{KEY_NS}_dm_mat")
     elements  = st.text_input(LBL["elements"],  key=f"{KEY_NS}_dm_elem")
-    image_file= st.file_uploader(
+
+    image_file = st.file_uploader(
         LBL["upload"],
         type=["jpg","jpeg","png"],
         key=f"{KEY_NS}_dm_up",
-        accept_multiple_files=True  # supports multi-view facades
+        accept_multiple_files=True
     )
 
     if image_file and st.button(LBL["add_btn"], key=f"{KEY_NS}_dm_add"):
-        if not name:
+        # 🔴 FIX: check the English name variable, not `name`
+        if not name_en:
             st.error(LBL["err_name"])
         else:
-            # create card id first
+            # Create a new ID (you can change this if you use your own IDs)
             card_id = str(int(time.time()))
+
             img_dir = DATA_DIR / card_id
             img_dir.mkdir(parents=True, exist_ok=True)
 
@@ -347,26 +602,62 @@ if page == "Database Manager":
                 pil_img.save(out_path)
                 image_paths.append(str(out_path))
 
+            # 🔴 FIX: use `name_en` and `name_zh` here
             card = {
                 "id": card_id,
-                "name": name, "location": location, "era": era, "style": style,
-                "massing": massing, "structure": structure, "condition": condition,
-                "intro": intro, "history": history,
+                "name": name_en,
+                "name_zh": name_zh,
+                "location": location,
+                "era": era,
+                "style": style,
+                "massing": massing,
+                "structure": structure,
+                "condition": condition,
+                "intro": intro,
+                "history": history,
                 "materials": [m.strip() for m in materials.split(",") if m.strip()],
                 "elements": [e.strip() for e in elements.split(",") if e.strip()],
-                "images": image_paths,  # multi-view
+                "images": image_paths,
             }
+
+            # build compact info string for grounding
             card["info"] = _make_info(card)
 
+            # append to JSONL DB
             with open(CARDS_PATH, "a", encoding="utf-8") as f:
                 f.write(json.dumps(card, ensure_ascii=False) + "\n")
 
-            with st.spinner(LBL["indexing"]):
-                build_index(str(CARDS_PATH), str(IDX_PATH))
+        # Rebuild index (for visual retrieval)
+        with st.spinner(LBL["indexing"]):
+            build_index(str(CARDS_PATH), str(IDX_PATH))
 
-            st.success(LBL["added_ok"].format(name=name))
+        # Generate QR code with building name at the top
+        try:
+            qr_path = generate_qr_for_building(card, base_url=BASE_URL)
+
+            st.success(LBL["added_ok"].format(name=name_en))
+
+            st.caption(
+                "QR code for this building (scan to open guide page):"
+                if LANG != "zh" else
+                "建筑二维码（扫码打开导览页面）："
+            )
+            st.image(qr_path, width=180)
+
+            # Show the URL text (optional but useful for debugging/printing)
+            qr_url = f"{BASE_URL.rstrip('/')}/?facade_id={card_id}"
+            st.caption(qr_url)
+
+        except Exception as e:
+            # If QR generation fails, at least confirm DB + index success
+            st.success(LBL["added_ok"].format(name=name_en))
+            st.warning(f"QR generation failed: {e}")
+
 
     st.stop()  # don't run analysis on this page
+
+
+
 # =========================
 # app.py — PART 2 of 3
 # =========================
@@ -958,6 +1249,7 @@ def _pollinations_chat(
     """
     import requests
     from urllib.parse import quote
+    import urllib.parse
 
     # ---- Build prompt, including image ref if any ----
     if image_data_url:
@@ -1399,6 +1691,37 @@ def chart_explainer_text_only(metrics: Dict[str, Any], lang="en") -> str:
 from functools import lru_cache
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL_MIN*60)
+def get_all_cards() -> list[dict]:
+    return load_cards_jsonl(str(CARDS_PATH))
+
+
+def pick_best_image(card: dict) -> Optional[str]:
+    """
+    Choose one 'clear' facade image for a card.
+    For now: pick the image with largest pixel area.
+    """
+    imgs = card.get("images") or []
+    if not imgs and card.get("image"):
+        imgs = [card["image"]]
+
+    best_path = None
+    best_area = 0
+    for p in imgs:
+        if not p or not Path(p).exists():
+            continue
+        try:
+            im = Image.open(p)
+            w, h = im.size
+            area = w * h
+            if area > best_area:
+                best_area = area
+                best_path = p
+        except Exception:
+            continue
+    return best_path
+
+
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL_MIN*60)
 def _cached_components_overlay(raw_bytes: bytes, max_side: int):
     pil = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
     pil_disp = pil.copy()
@@ -1535,7 +1858,7 @@ def make_report(
 
     # Header
     c.setFont("STSong-Light", 16)
-    c.drawString(LM, y, "AI Analysis of Historic Architecture / 历史建筑的人工智能分析")
+    c.drawString(LM, y, "AI Analysis of Facade / 立面人工智能分析")
     y -= 22
     c.setFont("STSong-Light", 10)
     c.drawString(LM, y, _t.strftime("Generated on / 生成于 %Y-%m-%d %H:%M:%S"))
@@ -1654,204 +1977,388 @@ def update_and_rank(score, name, hist_path=HIST_PATH):
         pass
     return rank, N, percentile
 
+
+#--- analysis part method 
+
+def run_facade_analysis(
+    raw: bytes,
+    label: str,
+    *,
+    known_card: Optional[dict] = None,
+    source_id: str = "facade"
+):
+    """
+    Run the full analysis pipeline for ONE image.
+
+    - raw: image bytes
+    - label: title shown in the UI
+    - known_card: if provided, we ALREADY know which DB card this belongs to,
+      so we skip image retrieval. If None, we run retrieve_verified_multiview.
+    - source_id: short id for ranking / PDF / QA keys.
+    """
+    from pathlib import Path
+
+    st.subheader(label)
+
+    # Turn into data URL for Pollinations
+    img_data_url = _bytes_to_data_url(raw, mime="image/jpeg")
+
+    # 1) Components + overlay (cached)
+    with st.spinner("Detecting components..."):
+        pil, dets, overlay = _cached_components_overlay(raw, MAX_SIDE)
+
+    # 2) Metrics + principles (cached)
+    ratio, w2w, sym_v, sym_r, rhythm, fractal, principles, principles_img = _cached_metrics(raw, dets, MAX_SIDE)
+
+    # 3) Heatmap (cached)
+    with st.spinner("Computing heatmap..."):
+        heat = _cached_heatmap(raw, MAX_SIDE)
+
+    # 4) Normalize + viz (cached)
+    norms = _cached_norms(sym_v, sym_r, ratio, w2w, rhythm, fractal)
+
+    overall_beauty = composite_beauty_score(principles)      # 0–1
+    composite_index_0_5 = 5.0 * overall_beauty               # 0–5 scale for bar
+    viz_img = _cached_viz(norms, composite_index_0_5)
+
+    # ---------- show images ----------
+    cols = st.columns(3)
+    cols[0].image(pil, caption="Original", width='stretch')
+    cols[1].image(overlay, caption="Semantic overlay (heuristic)", width='stretch')
+    cols[2].image(heat, caption="Explainability heatmap", width='stretch')
+
+    # Metrics dict (for narrative & PDF)
+    metrics_dict = {
+        "symmetry_vertical": round(sym_v, 3),
+        "symmetry_rotational": round(sym_r, 3),
+        "facade_ratio_H_W": round(ratio, 3),
+        "window_to_wall_ratio": round(w2w, 3),
+        "rhythm_fft_peak": round(rhythm, 3),
+        "fractal_dimension": round(fractal, 3),
+        **{f"principle_{k}": round(v, 3) for k, v in principles.items()}
+    }
+
+    # ---------- DB retrieval / info ----------
+    db_info = None
+    verified_card = None
+
+    if known_card is not None:
+        # We already know which building this is (search-by-name path)
+        verified_card = known_card
+        db_info = _make_info(verified_card)
+        st.caption(f"DB facts used for narrative: {db_info}")
+    else:
+        # Upload path: we still need to find the matching building
+        tmp_image_path = str(Path("outputs") / f"_tmp_{source_id}.png")
+        Image.open(io.BytesIO(raw)).convert("RGB").save(tmp_image_path)
+
+        try:
+            matched_card, combined, dbg = retrieve_verified_multiview(
+                tmp_image_path,
+                str(IDX_PATH),
+                base_threshold=0.30,
+            )
+            if matched_card:
+                verified_card = matched_card
+                db_info = _make_info(verified_card)
+                st.caption(f"DB facts used for narrative: {db_info}")
+            else:
+                st.caption(
+                    f"No reliable DB match ({dbg.get('reason', '?')})"
+                )
+        except Exception as e:
+            st.caption(f"DB match error: {e}")
+
+    # ---------- narrative ----------
+    with st.spinner("Generating facade narrative..."):
+        story = generate_facade_narrative_pollinations(
+            metrics_dict,
+            dets,
+            lang=LANG,
+            db_info=db_info,
+            image_data_url=img_data_url,
+        )
+
+    st.markdown("### Design Narrative / 設計敘事")
+    st.write(story)
+
+    # ---------- aesthetic viz + explanation ----------
+    st.markdown("### Aesthetic Visualization / 美學視覺化")
+    st.image(viz_img, caption="Feature profile and score makeup", width='stretch')
+
+    with st.spinner("Explaining the chart..."):
+        chart_explanation = chart_explainer_pollinations(
+            metrics_dict,
+            lang=LANG,
+            db_info=db_info,
+            image_data_url=img_data_url,
+        )
+        if not chart_explanation or "(Pollinations" in chart_explanation:
+            chart_explanation = chart_explainer_text_only(metrics_dict, lang=LANG)
+
+    st.markdown("#### Explanation / 解释")
+    st.markdown(chart_explanation)
+
+    st.markdown("### Ten Principles of Beauty / 十大美学原则")
+    st.image(principles_img, caption="Normalized 0–1 scores per principle", width='stretch')
+
+    st.markdown("### Overall Facade Beauty / 立面总体美度")
+    overall_img = build_overall_beauty_line(overall_beauty, lang=LANG)
+    st.image(overall_img, caption=f"Overall beauty = {overall_beauty:.2f}", width='stretch')
+    st.info(f"Overall Beauty (0–1): **{overall_beauty:.2f}**")
+
+    # ---------- ranking ----------
+    rank, N, perc = update_and_rank(overall_beauty, source_id, HIST_PATH)
+    st.info(f"Comparative ranking / 對比排名: {rank} / {N}  (~{perc:.1f}th percentile)")
+
+    # ---------- Q&A ----------
+    st.markdown("### Ask / 问")
+    user_q = st.text_input(
+        "Ask a question about this building" if LANG != "zh" else "请就此建筑提问",
+        key=f"{KEY_NS}_qa_{source_id}",
+    )
+
+    if user_q:
+        info_text = _make_info(verified_card) if verified_card else ""
+        if info_text:
+            sys = "Answer ONLY using the provided Information. If not present, reply EXACTLY: NOTFOUND."
+            if LANG == "zh":
+                sys = "仅根据提供的信息回答。如果信息中没有，请严格回复：NOTFOUND。"
+            ans = _pollinations_chat(
+                f"Information:\n{info_text}\n\nQuestion:\n{user_q}\nAnswer:",
+                system_text=sys,
+            )
+            if ans.strip().upper().startswith("NOTFOUND"):
+                st.warning(
+                    "Sorry, not found in the current building information."
+                    if LANG != "zh" else
+                    "抱歉，在当前建筑信息中未找到。"
+                )
+            else:
+                st.success(ans)
+        else:
+            st.warning("No building info available for Q&A.")
+
+    # ---------- PDF ----------
+    pdf_bytes = make_report(
+        pil, overlay, heat, viz_img,
+        metrics=metrics_dict,
+        ranking=(rank, N, perc),
+        story_text=story,
+        lang=LANG,
+        interiors=(verified_card.get("interiors") if verified_card else None),
+        chart_explanation_text=chart_explanation,
+        principles_img=principles_img,
+        principles_scores=principles,
+        overall_img=overall_img,
+        overall_score=overall_beauty,
+    )
+
+    st.download_button(
+        "Download report PDF / 下載報告 PDF",
+        data=pdf_bytes,
+        file_name=f"{source_id}_report.pdf",
+        mime="application/pdf",
+        key=f"{KEY_NS}_dl_{source_id}",
+    )
+
+
+#--analysis part method end 
 # ---------------- Main Analysis ----------------
 
 if page == "Analysis":
-    # Make sure index is present/valid before any retrieval
     ensure_index(str(CARDS_PATH), str(IDX_PATH))
 
+    # ---- 1) QR / direct ID lookup via URL query params ----
+    # Example QR URL:
+    #   https://your-app-url/?id=tch-001
+    #   https://your-app-url/?facade=tch-001
+    #   https://your-app-url/?facade_id=tch-001
+    params = st.query_params  # ✅ new API, replaces st.experimental_get_query_params()
+
+    qr_id = None
+    for key in ("id", "facade", "facade_id"):
+        if key in params:
+            v = params[key]
+            if isinstance(v, (list, tuple)):
+                qr_id = (v[0] or "").strip()
+            else:
+                qr_id = str(v).strip()
+            break
+
+    if qr_id:
+        # 1) Load DB and find the matching card by id / English name / Chinese name
+        cards = load_cards_jsonl(str(CARDS_PATH))
+        card = None
+        for c in cards:
+            cid     = str(c.get("id", "")).strip()
+            name_en = (c.get("name") or "").strip()
+            name_zh = (c.get("name_zh") or "").strip()
+            if qr_id == cid or qr_id == name_en or (name_zh and qr_id == name_zh):
+                card = c
+                break
+
+        if not card:
+            st.error(
+                "This building is not in our database yet."
+                if LANG != "zh" else
+                "此建筑尚未收录在数据库中。"
+            )
+            st.stop()
+
+        # 2) Title: EN + ZH if available
+        title_line = card.get("name", "")
+        if card.get("name_zh"):
+            title_line += f" / {card['name_zh']}"
+        st.header(title_line)
+
+        # 3) Show ALL available images as a small thumbnail gallery
+        imgs = card.get("images") or []
+        if not imgs and card.get("image"):  # legacy single image
+            imgs = [card["image"]]
+
+        valid_paths = [str(Path(p)) for p in imgs if p and Path(p).exists()]
+
+        if valid_paths:
+            st.markdown(
+                "### Facade views / 立面视图"
+                if LANG != "zh" else
+                "### 立面视图"
+            )
+
+            # thumbnails in a grid; each image is clickable to enlarge
+            num_cols = min(4, len(valid_paths))  # up to 4 per row
+            cols = st.columns(num_cols)
+
+            for i, img_path in enumerate(valid_paths):
+                col = cols[i % num_cols]
+                # smaller display; click opens larger preview
+                col.image(
+                    img_path,
+                    width='stretch',
+                    caption=f"View {i+1}" if LANG != "zh" else f"视角 {i+1}",
+                )
+
+        # 4) Build DB info text and generate *guide-style* narrative
+        db_info = _make_info(card)
+
+        guide_text = generate_qr_guide_text(
+            db_info=db_info,
+            lang=LANG,
+            image_data_url=None  # no need to send image for this
+        )
+
+        st.markdown(
+            "### Building Guide / 建筑导览"
+            if LANG != "zh" else
+            "### 建筑导览说明"
+        )
+        st.write(guide_text)
+
+        # 5) Q&A — based ONLY on db_info (no hallucinated facts)
+        st.markdown(
+            "### Ask a question / 提问"
+            if LANG != "zh" else
+            "### 提问"
+        )
+        qa_key = f"{KEY_NS}_qr_qa_{card.get('id','')}"
+        user_q = st.text_input(
+            "Ask something about this building."
+            if LANG != "zh" else
+            "可以就这座建筑问一个问题。",
+            key=qa_key
+        )
+
+        if user_q:
+            if db_info:
+                if LANG == "zh":
+                    sys = (
+                        "你是这座建筑的导览员，只能根据提供的信息回答问题。"
+                        "如果问题中涉及的信息在资料里不存在，请简短说明“资料中没有相关信息”。"
+                        "不要编造具体事实。"
+                    )
+                else:
+                    sys = (
+                        "You are the guide for this building. "
+                        "Answer ONLY using the provided information. "
+                        "If the question asks about something not in the info, briefly say "
+                        "'That detail is not in the current information.' Do NOT invent facts."
+                    )
+
+                ans = _pollinations_chat(
+                    f"Information:\n{db_info}\n\nQuestion:\n{user_q}\nAnswer:",
+                    system_text=sys,
+                    api_base=API_BASE,
+                )
+                st.success(ans)
+            else:
+                st.warning(
+                    "No building info is available yet for Q&A."
+                    if LANG != "zh" else
+                    "目前没有可用于问答的建筑信息。"
+                )
+
+        # 6) Stop: QR page should NOT fall through to upload UI
+        st.stop()
+
+        
+   
+    # --- 1) normal upload path (can reuse same function) ---
     uploaded = st.file_uploader(
         "Upload Building Facade Image / 上传建筑立面图片",
-        type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"{KEY_NS}_uploader"
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key=f"{KEY_NS}_uploader",
     )
+    st.markdown("---")
+    # --- 2) optional search-by-name ---
+    st.markdown("#### Search by building name (optional) / 按建筑物名称搜索（可选）")
+    name_query = st.text_input(
+        "Type building name (e.g. 'National Taichung Theater') / 建筑物名称（例如“台中国家剧院”）",
+        key=f"{KEY_NS}_name_search",
+    )
+
+    if name_query:
+        cards = load_cards_jsonl(str(CARDS_PATH))
+        matches = [c for c in cards if card_matches_name_query(c, name_query)]
+
+        if not matches:
+            st.warning("This building name does not exist in our database.")
+        else:
+            if len(matches) == 1:
+                selected_card = matches[0]
+            else:
+                options = [c["name"] for c in matches]
+                chosen = st.selectbox(
+                    "Multiple matches found – choose one:",
+                    options,
+                    key=f"{KEY_NS}_name_choice",
+                )
+                selected_card = next(c for c in matches if c["name"] == chosen)
+
+            img_path = pick_best_image(selected_card)
+            if not img_path:
+                st.warning("This building is in the database but has no usable images.")
+            else:
+                with open(img_path, "rb") as f:
+                    raw = f.read()
+                # ONE call, same pipeline as upload
+                run_facade_analysis(
+                    raw,
+                    label=f"{selected_card.get('name','(from DB)')} (from database)",
+                    known_card=selected_card,
+                    source_id=selected_card.get("id", "db_facade"),
+                )
+
+   
 
     if uploaded:
         for up in uploaded:
-            st.subheader(up.name)
             raw = up.read()
-            img_data_url = _bytes_to_data_url(raw, mime="image/jpeg")
-            up.seek(0)
-
-            # 1) Components + overlay (cached)
-            with st.spinner("Detecting components..."):
-                pil, dets, overlay = _cached_components_overlay(raw, MAX_SIDE)
-
-            # 2) Metrics + principles (cached)
-            ratio, w2w, sym_v, sym_r, rhythm, fractal, principles, principles_img = _cached_metrics(raw, dets, MAX_SIDE)
-
-            # 3) Heatmap (cached)
-            with st.spinner("Computing heatmap..."):
-                heat = _cached_heatmap(raw, MAX_SIDE)
-
-            # 4) Normalize + viz (cached)
-            norms = _cached_norms(sym_v, sym_r, ratio, w2w, rhythm, fractal)
-
-            # Composite indices
-            overall_beauty = composite_beauty_score(principles)            # 0–1
-            composite_index_0_5 = 5.0 * overall_beauty                     # 0–5 scale for bar
-            viz_img = _cached_viz(norms, composite_index_0_5)
-
-            # UI render — always show original, overlay, heatmap as requested
-            cols = st.columns(3)
-            cols[0].image(pil, caption="Original", width='stretch')
-
-            if SHOW_OVERLAY_UI and overlay is not None:
-                cols[1].image(overlay, caption="Semantic overlay (heuristic)", width='stretch')
-            else:
-                cols[1].empty()
-
-            if SHOW_HEATMAP_UI and heat is not None:
-                cols[2].image(heat, caption="Explainability heatmap", width='stretch')
-            else:
-                cols[2].empty()
-
-            # Metrics dict (for text + PDF)
-            metrics_dict = {
-                "symmetry_vertical": round(sym_v, 3),
-                "symmetry_rotational": round(sym_r, 3),
-                "facade_ratio_H_W": round(ratio, 3),
-                "window_to_wall_ratio": round(w2w, 3),
-                "rhythm_fft_peak": round(rhythm, 3),
-                "fractal_dimension": round(fractal, 3),
-                **{f"principle_{k}": round(v, 3) for k, v in principles.items()}
-            }
-
-            # save temp for retrieval check
-            tmp_image_path = str(Path("outputs") / f"_tmp_{Path(up.name).stem}.png")
-            Image.open(io.BytesIO(raw)).convert("RGB").save(tmp_image_path)
-
-            # retrieval verification (lightweight index)
-            verified_card = None
-            db_info = None
-            try:
-                verified_card, combined, dbg = retrieve_verified_multiview(
-                    tmp_image_path,
-                    str(IDX_PATH),
-                    base_threshold=0.30,
-                )
-
-                if verified_card:
-                    db_info = _make_info(verified_card)
-                    st.caption(f"DB facts used for narrative: {db_info}")
-
-                    badge = f"DB match: **{verified_card.get('name', '?')}**"
-                    sub = []
-                    if verified_card.get("location"):
-                        sub.append(verified_card["location"])
-                    if verified_card.get("era"):
-                        sub.append(verified_card["era"])
-                    if verified_card.get("style"):
-                        sub.append(verified_card["style"])
-                    if sub:
-                        badge += " — " + ", ".join(sub)
-                    # You can show this if you like:
-                    # st.success(badge)
-
-                else:
-                    st.caption(
-                        f"No reliable DB match ({dbg.get('reason', '?')}, "
-                        f"s1={dbg.get('s1', 0):.3f})"
-                    )
-            except Exception as e:
-                st.caption(f"DB match error: {e}")
-
-            # Narrative (Pollinations), grounded when db_info is present
-            with st.spinner("Generating facade narrative..."):
-                story = generate_facade_narrative_pollinations(
-                    metrics_dict,
-                    dets,
-                    lang=LANG,
-                    db_info=db_info,
-                    image_data_url=img_data_url
-                )
-
-            st.markdown("### Design Narrative / 設計敘事")
-            st.write(story)
-
-            # Viz + Chart Explanation (Pollinations)
-            st.markdown("### Aesthetic Visualization / 美學視覺化")
-            st.image(viz_img, caption="Feature profile and score makeup",   width='stretch')
-
-            with st.spinner("Explaining the chart..."):
-                chart_explanation = chart_explainer_pollinations(
-                    metrics_dict,
-                    lang=LANG,
-                    db_info=db_info,
-                    image_data_url=img_data_url
-                )
-                if not chart_explanation or "(Pollinations" in chart_explanation:
-                    chart_explanation = chart_explainer_text_only(metrics_dict, lang=LANG)
-
-            st.markdown("#### Explanation / 解释")
-            st.markdown(chart_explanation)
-
-            st.markdown("### Ten Principles of Beauty / 十大美学原则")
-            st.image(principles_img, caption="Normalized 0–1 scores per principle",   width='stretch')
-
-            st.markdown("### Overall Facade Beauty / 立面总体美度")
-            overall_img = build_overall_beauty_line(overall_beauty, lang=LANG)
-            st.image(overall_img, caption=f"Overall beauty = {overall_beauty:.2f}",   width='stretch')
-            st.info(f"Overall Beauty (0–1): **{overall_beauty:.2f}**")
-
-            # Ranking uses overall_beauty
-            rank, N, perc = update_and_rank(overall_beauty, Path(up.name).stem, HIST_PATH)
-            st.info(f"Comparative ranking / 對比排名: {rank} / {N}  (~{perc:.1f}th percentile)")
-
-            # Ask (grounded) — only if matched
-            st.markdown("### Ask / 问")
-            qa_key = f"{KEY_NS}_qa_{Path(up.name).stem}"
-            user_q = st.text_input(
-                "Ask a question about this building" if LANG != "zh" else "请就此建筑提问",
-                key=qa_key
-            )
-
-            if user_q:
-                if verified_card:
-                    info_text = _make_info(verified_card)
-                else:
-                    info_text = ""
-
-                if info_text:
-                    sys = "Answer ONLY using the provided Information. If not present, reply EXACTLY: NOTFOUND."
-                    if LANG == "zh":
-                        sys = "仅根据提供的信息回答。如果信息中没有，请严格回复：NOTFOUND。"
-
-                    ans = _pollinations_chat(
-                        f"Information:\n{info_text}\n\nQuestion:\n{user_q}\nAnswer:",
-                        system_text=sys
-                    )
-
-                    if ans.strip().upper().startswith("NOTFOUND"):
-                        st.warning(
-                            "Sorry, not found in the current building information."
-                            if LANG != "zh" else
-                            "抱歉，在当前建筑信息中未找到。"
-                        )
-                    else:
-                        st.success(ans)
-                else:
-                    st.warning("No building info available for Q&A.")
-
-            # PDF
-            pdf_bytes = make_report(
-                pil, overlay, heat, viz_img,
-                metrics=metrics_dict,
-                ranking=(rank, N, perc),
-                story_text=story,
-                lang=LANG,
-                interiors=(verified_card.get("interiors") if verified_card else None),
-                chart_explanation_text=chart_explanation,
-                principles_img=principles_img,
-                principles_scores=principles,
-                overall_img=overall_img,
-                overall_score=overall_beauty
-            )
-            st.session_state["last_pdf"] = pdf_bytes
-            st.session_state["last_name"] = Path(up.name).stem
-            st.download_button(
-                "Download report PDF / 下載報告 PDF",
-                data=st.session_state["last_pdf"],
-                file_name=st.session_state["last_name"] + "_report.pdf",
-                mime="application/pdf",
-                key=f"{KEY_NS}_dl_{st.session_state['last_name']}"
+            # here we DON'T know the card, so known_card=None
+            run_facade_analysis(
+                raw,
+                label=up.name,
+                known_card=None,
+                source_id=Path(up.name).stem,
             )
