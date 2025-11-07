@@ -62,7 +62,12 @@ pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
 pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
 # --- app title and state
-st.set_page_config(page_title="AI Analysis of Facade", layout="wide")
+st.set_page_config(
+    page_title="AI Analysis of Facade",
+    layout="wide",                      # good for desktop
+    initial_sidebar_state="collapsed",  # ✅ sidebar hidden by default on mobile
+)
+
 st.title("AI Analysis of Facade / 立面人工智能分析")
 st.write("")
 if "flash" in st.session_state:
@@ -84,29 +89,130 @@ QR_DIR = DATA_DIR / "qr"
 QR_DIR.mkdir(exist_ok=True)
 
 #---helper for qr code 
+
+ROOT = Path(__file__).parent.resolve()
+DATA_DIR = ROOT / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
+FONTS_DIR = DATA_DIR / "fonts"
+FONTS_DIR.mkdir(parents=True, exist_ok=True)
+
+QR_DIR = DATA_DIR / "qr"
+QR_DIR.mkdir(parents=True, exist_ok=True)
+
+QR_TITLE_FONT_PATH = FONTS_DIR / "NotoSansSC-Regular.ttf"
+
+def _load_qr_title_font(size: int = 28) -> ImageFont.FreeTypeFont:
+    """
+    Load NotoSansSC-Regular.ttf from data/fonts for QR titles
+    (supports both English + Chinese). If missing, fall back to a
+    default font (Chinese may show as □□, but it won't crash).
+    """
+    try:
+        if QR_TITLE_FONT_PATH.exists():
+            return ImageFont.truetype(str(QR_TITLE_FONT_PATH), size)
+    except Exception as e:
+        # If you want, you can log/print this; in Streamlit you could:
+        # st.warning(f"Could not load CJK font: {e}")
+        pass
+    return ImageFont.load_default()
+
+
+def _measure_text(draw_obj, text: str, font_obj: ImageFont.FreeTypeFont) -> tuple[int, int]:
+    """Robust text size measurement (Pillow 9/10 compatible)."""
+    try:
+        bbox = draw_obj.textbbox((0, 0), text, font=font_obj)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        pass
+    try:
+        bbox = font_obj.getbbox(text)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        pass
+    try:
+        return font_obj.getsize(text)
+    except Exception:
+        # crude fallback
+        return (8 * len(text), 18)
+
+
+from qrcode.image.pil import PilImage  # you already use this type hint
+
 def generate_qr_for_facade(facade_id: str) -> Tuple[str, str]:
     """
-    Generate a QR code PNG for this facade id.
+    Generate a QR code PNG for this facade id, with a title band that
+    includes English + Chinese name.
 
     Returns:
       (qr_image_path, qr_target_url)
     """
-    # The URL that will open this facade via QR (you already handle this in your QR logic)
-    target = f"{APP_BASE_URL}/?facade_id={facade_id}"
+    # URL that QR should open
+    target = f"{BASE_URL}/?facade_id={urllib.parse.quote(facade_id)}"
 
-    # Save QR PNG under data/qr/{facade_id}.png
-    out_path = QR_DIR / f"{facade_id}.png"
+    # Load card so we can get EN / ZH name
+    cards = load_cards_jsonl(str(CARDS_PATH))
+    card = next((c for c in cards if str(c.get("id", "")).strip() == facade_id), None)
 
+    name_en = (card.get("name") if card else "") or ""
+    name_zh = (card.get("name_zh") if card else "") or ""
+    name_en = name_en.strip()
+    name_zh = name_zh.strip()
+
+    if name_en and name_zh:
+        title = f"{name_en} / {name_zh}"
+    else:
+        title = name_en or name_zh  # at least one of them, if available
+
+    # ---------- 1) Base QR ----------
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=8,
-        border=2,
+        box_size=12,   # a bit larger for print readability
+        border=4,
     )
     qr.add_data(target)
     qr.make(fit=True)
-    img: PilImage = qr.make_image(fill_color="black", back_color="white")
-    img.save(out_path)
+    qr_img: PilImage = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    W, H = qr_img.size
+
+    # If we somehow have no title, just save raw QR
+    out_path = QR_DIR / f"{facade_id}.png"
+    if not title:
+        qr_img.save(out_path)
+        return str(out_path), target
+
+    # ---------- 2) Title band with CJK font ----------
+    font = _load_qr_title_font(28)
+    title_band_height = 80
+
+    temp_canvas = Image.new("RGB", (W, H + title_band_height), "white")
+    temp_draw = ImageDraw.Draw(temp_canvas)
+    text_w, text_h = _measure_text(temp_draw, title, font)
+    max_width = W - 20
+
+    # shrink font if title too long
+    while text_w > max_width and getattr(font, "size", None) and font.size > 16:
+        try:
+            font = ImageFont.truetype(str(QR_TITLE_FONT_PATH), font.size - 2)
+        except Exception:
+            break
+        text_w, text_h = _measure_text(temp_draw, title, font)
+
+    canvas = Image.new("RGB", (W, H + title_band_height), "white")
+    draw = ImageDraw.Draw(canvas)
+
+    text_x = (W - text_w) // 2
+    text_y = (title_band_height - text_h) // 2
+    draw.text((text_x, text_y), title, fill="black", font=font)
+
+    # paste QR under the title band
+    canvas.paste(qr_img, (0, title_band_height))
+
+    # upscale for sharper print / screens
+    scale = 2
+    big = canvas.resize((canvas.width * scale, canvas.height * scale), Image.LANCZOS)
+    big.save(out_path)
 
     return str(out_path), target
 
@@ -631,11 +737,16 @@ if page == "Database Manager":
         with st.spinner(LBL["indexing"]):
             build_index(str(CARDS_PATH), str(IDX_PATH))
 
-        # Generate QR code with building name at the top
         try:
-            qr_path = generate_qr_for_building(card, base_url=BASE_URL)
-
+            qr_path, qr_url = generate_qr_for_facade(card_id)
             st.success(LBL["added_ok"].format(name=name_en))
+            st.caption("QR code for this facade:")
+            st.image(qr_path, width=160)
+            st.caption(qr_url)
+        except Exception as e:
+            st.warning(f"QR generation failed: {e}")
+            st.success(LBL["added_ok"].format(name=name_en))
+
 
             st.caption(
                 "QR code for this building (scan to open guide page):"
@@ -1339,6 +1450,67 @@ def _pollinations_chat(
     except Exception as e:
         return f"(Pollinations exception: {e}; last error: {last_err})"
 
+#-- question anser helper
+def answer_building_question(db_info: str, question: str, lang: str = "en") -> str:
+    """
+    Use Pollinations to answer a question about one building.
+
+    Goals:
+    - Handle many ways of asking (synonyms, paraphrases).
+    - Use ONLY info inside db_info (no invented facts).
+    - If something related is there (even approximate), answer with it.
+    - Only when there is no related info at all return 'NOTFOUND'.
+    """
+    if not db_info or not db_info.strip():
+        return "NOTFOUND"
+
+    if lang == "zh":
+        sys = (
+            "你是这座建筑的专业导览员，只能根据提供的建筑资料回答问题。"
+            "请用语义理解匹配不同问法，例如：\n"
+            " - “哪一年建成”“什么时候建造”“何时开放” 都归为时间问题；\n"
+            " - “建筑风格是什么”“属于哪种类型” 都归为风格问题；\n"
+            " - “有什么用途”“做什么用的” 是功能问题；\n"
+            " - “在哪一区”“位于什么地方” 是位置问题；\n"
+            " - “用什么材料”“立面是什么做的” 是材料/结构问题。\n"
+            "如果资料只给出大概信息（如“1930年代”“民间艺术环境”等），"
+            "问题问得更具体时，仍然使用这些大概信息作答，并可以说明是大致年代或概括类别。\n"
+            "只有在资料中完全找不到与问题相关的内容时，才回答：NOTFOUND。\n"
+            "绝对不要编造资料中没有的年份、人物、数字或事件。"
+        )
+        tail = "请用一到两句话简洁回答。"
+    else:
+        sys = (
+            "You are a professional guide for THIS ONE building. "
+            "You must answer ONLY using the facts in the provided text.\n"
+            "- Treat different phrasings semantically (e.g. 'when was it built', "
+            "'what year was it constructed', 'when did it open' are all time questions; "
+            "style/type questions go together; function/use questions go together; "
+            "location questions go together; material/structure questions go together).\n"
+            "- If the text only has approximate info (e.g. '1930s', 'modernist style', "
+            "'folk art environment') and the question asks for more precision, "
+            "you STILL answer using that approximate information and may say it is approximate.\n"
+            "- Only if you truly find no related information in the text should you answer "
+            "EXACTLY: NOTFOUND.\n"
+            "Do NOT invent new dates, names, numbers, or events."
+        )
+        tail = "Answer in one or two clear sentences."
+
+    prompt = (
+        "Building information:\n"
+        f"{db_info}\n\n"
+        f"Question:\n{question}\n\n"
+        f"{tail}\n\n"
+        "Answer:"
+    )
+
+    ans = _pollinations_chat(
+        prompt,
+        system_text=sys,
+        api_base=API_BASE,
+    )
+    return (ans or "").strip()
+
 # ---------- small JSON helper for safe-sized prompts ----------
 def _safe_json(obj: dict, max_chars: int = 8000) -> str:
     s = json.dumps(obj, ensure_ascii=False, indent=2)
@@ -1949,7 +2121,7 @@ def make_report(
     c.setFont("Helvetica", 11)
     try:
         rank, N, perc = ranking
-        c.drawString(LM, y, f"Comparative ranking: {rank} / {N}  (~{perc:.1f}th percentile)")
+       # c.drawString(LM, y, f"Comparative ranking: {rank} / {N}  (~{perc:.1f}th percentile)")
         y -= 16
     except Exception:
         pass
@@ -2046,7 +2218,7 @@ def run_facade_analysis(
         # We already know which building this is (search-by-name path)
         verified_card = known_card
         db_info = _make_info(verified_card)
-        st.caption(f"DB facts used for narrative: {db_info}")
+        #st.caption(f"DB facts used for narrative: {db_info}")
     else:
         # Upload path: we still need to find the matching building
         tmp_image_path = str(Path("outputs") / f"_tmp_{source_id}.png")
@@ -2061,7 +2233,7 @@ def run_facade_analysis(
             if matched_card:
                 verified_card = matched_card
                 db_info = _make_info(verified_card)
-                st.caption(f"DB facts used for narrative: {db_info}")
+               # st.caption(f"DB facts used for narrative: {db_info}")
             else:
                 st.caption(
                     f"No reliable DB match ({dbg.get('reason', '?')})"
@@ -2109,8 +2281,9 @@ def run_facade_analysis(
 
     # ---------- ranking ----------
     rank, N, perc = update_and_rank(overall_beauty, source_id, HIST_PATH)
-    st.info(f"Comparative ranking / 對比排名: {rank} / {N}  (~{perc:.1f}th percentile)")
+    #st.info(f"Comparative ranking / 對比排名: {rank} / {N}  (~{perc:.1f}th percentile)")
 
+ 
     # ---------- Q&A ----------
     st.markdown("### Ask / 问")
     user_q = st.text_input(
@@ -2121,23 +2294,23 @@ def run_facade_analysis(
     if user_q:
         info_text = _make_info(verified_card) if verified_card else ""
         if info_text:
-            sys = "Answer ONLY using the provided Information. If not present, reply EXACTLY: NOTFOUND."
-            if LANG == "zh":
-                sys = "仅根据提供的信息回答。如果信息中没有，请严格回复：NOTFOUND。"
-            ans = _pollinations_chat(
-                f"Information:\n{info_text}\n\nQuestion:\n{user_q}\nAnswer:",
-                system_text=sys,
-            )
+            ans = answer_building_question(info_text, user_q, lang=LANG)
+
             if ans.strip().upper().startswith("NOTFOUND"):
                 st.warning(
-                    "Sorry, not found in the current building information."
+                    "Sorry, that detail is not in the current building information."
                     if LANG != "zh" else
-                    "抱歉，在当前建筑信息中未找到。"
+                    "抱歉，在当前建筑信息中没有这一条具体内容。"
                 )
             else:
                 st.success(ans)
         else:
-            st.warning("No building info available for Q&A.")
+            st.warning(
+                "No building info available for Q&A."
+                if LANG != "zh" else
+                "目前没有可用于问答的建筑信息。"
+            )
+
 
     # ---------- PDF ----------
     pdf_bytes = make_report(
@@ -2240,6 +2413,7 @@ if page == "Analysis":
                 )
 
         # 4) Build DB info text and generate *guide-style* narrative
+   
         db_info = _make_info(card)
 
         guide_text = generate_qr_guide_text(
@@ -2255,51 +2429,42 @@ if page == "Analysis":
         )
         st.write(guide_text)
 
-        # 5) Q&A — based ONLY on db_info (no hallucinated facts)
-        st.markdown(
-            "### Ask a question / 提问"
-            if LANG != "zh" else
-            "### 提问"
-        )
-        qa_key = f"{KEY_NS}_qr_qa_{card.get('id','')}"
+        # ---------- 5) Q&A — based ONLY on db_info ----------
+        st.markdown("### Ask / 问" if LANG != "zh" else "### 提问")
+
+        # stable id for this QR page
+        source_id = card.get("id", qr_id)
+
         user_q = st.text_input(
-            "Ask something about this building."
+            "Ask a question about this building"
             if LANG != "zh" else
-            "可以就这座建筑问一个问题。",
-            key=qa_key
+            "请就此建筑提问",
+            key=f"{KEY_NS}_qr_qa_{source_id}",
         )
 
         if user_q:
-            if db_info:
-                if LANG == "zh":
-                    sys = (
-                        "你是这座建筑的导览员，只能根据提供的信息回答问题。"
-                        "如果问题中涉及的信息在资料里不存在，请简短说明“资料中没有相关信息”。"
-                        "不要编造具体事实。"
+            info_text = db_info  # use the card info we already built
+            if info_text:
+                ans = answer_building_question(info_text, user_q, lang=LANG)
+
+                if ans.strip().upper().startswith("NOTFOUND"):
+                    st.warning(
+                        "Sorry, that detail is not in the current building information."
+                        if LANG != "zh" else
+                        "抱歉，在当前建筑信息中没有这一条具体内容。"
                     )
                 else:
-                    sys = (
-                        "You are the guide for this building. "
-                        "Answer ONLY using the provided information. "
-                        "If the question asks about something not in the info, briefly say "
-                        "'That detail is not in the current information.' Do NOT invent facts."
-                    )
-
-                ans = _pollinations_chat(
-                    f"Information:\n{db_info}\n\nQuestion:\n{user_q}\nAnswer:",
-                    system_text=sys,
-                    api_base=API_BASE,
-                )
-                st.success(ans)
+                    st.success(ans)
             else:
                 st.warning(
-                    "No building info is available yet for Q&A."
+                    "No building info available for Q&A."
                     if LANG != "zh" else
                     "目前没有可用于问答的建筑信息。"
                 )
 
         # 6) Stop: QR page should NOT fall through to upload UI
         st.stop()
+
 
         
    
@@ -2351,6 +2516,8 @@ if page == "Analysis":
                 )
 
    
+
+
 
     if uploaded:
         for up in uploaded:
