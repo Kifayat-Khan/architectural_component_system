@@ -2048,7 +2048,7 @@ def make_report(
     if y < BOT + 140:
         c.showPage(); y = H - TOP
     c.setFont("STSong-Light", 12)
-    c.drawString(LM, y, "Design Narrative / 设计叙事")
+    c.drawString(LM, y, "Narrative / 敘事")
     y -= 14
     body_font = "STSong-Light" if lang == "zh" else "Helvetica"
     font_size = 10 if lang == "en" else 11
@@ -2251,7 +2251,7 @@ def run_facade_analysis(
             image_data_url=img_data_url,
         )
 
-    st.markdown("### Design Narrative / 設計敘事")
+    st.markdown("### Narrative / 敘事")
     st.write(story)
 
     # ---------- aesthetic viz + explanation ----------
