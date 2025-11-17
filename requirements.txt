@@ -8,3 +8,6 @@ opencv-python-headless>=4.9
 requests>=2.31
 
 qrcode[pil]
+
+
+

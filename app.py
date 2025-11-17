@@ -301,6 +301,8 @@ def _resize_max_side(img: np.ndarray, max_side: int = 720) -> np.ndarray:
     return cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
 
 def _lab_hist_descriptor(img_rgb: np.ndarray, bins: int = 32) -> np.ndarray:
+    # Focus on the central part of the image (reduces sky/grass impact)
+    img_rgb = _central_crop(img_rgb, frac=0.8)
     # Convert to LAB and build concatenated hist (L,a,b) normalized
     lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB)
     hL = cv2.calcHist([lab],[0],None,[bins],[0,256]).flatten()
@@ -394,6 +396,29 @@ def ensure_index(cards_path: str, index_npz: str) -> None:
             build_index(cards_path, index_npz)
     except Exception:
         build_index(cards_path, index_npz)
+#----iamge matching helper
+def _resize_max_side(img: np.ndarray, max_side: int = 720) -> np.ndarray:
+    h, w = img.shape[:2]
+    if max(h, w) <= max_side:
+        return img
+    scale = max_side / float(max(h, w))
+    return cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+
+def _central_crop(img: np.ndarray, frac: float = 0.8) -> np.ndarray:
+    """
+    Take a central crop of the image to reduce sky/grass influence.
+    frac=0.8 keeps 80% of width/height.
+    """
+    h, w = img.shape[:2]
+    new_h = int(h * frac)
+    new_w = int(w * frac)
+    if new_h <= 0 or new_w <= 0:
+        return img
+    y1 = (h - new_h) // 2
+    x1 = (w - new_w) // 2
+    return img[y1:y1+new_h, x1:x1+new_w]
+
+
 
 #---search by name helper 
 def _norm_key(s: str) -> str:
@@ -794,25 +819,53 @@ def show_img(col_like, img, caption):
 COLOR_MAP = {"window": (46, 204, 113), "arch": (241, 196, 15)}
 
 def orb_inlier_ratio(query_path: str, cand_path: str, max_side: int = 720) -> float:
-    q = _read_image_rgb(query_path); c = _read_image_rgb(cand_path)
-    if q is None or c is None: return 0.0
-    q = _resize_max_side(q, max_side); c = _resize_max_side(c, max_side)
-    qg = cv2.cvtColor(q, cv2.COLOR_RGB2GRAY); cg = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+    # Read RGB images
+    q = _read_image_rgb(query_path)
+    c = _read_image_rgb(cand_path)
+    if q is None or c is None:
+        return 0.0
+
+    # Resize to a manageable size
+    q = _resize_max_side(q, max_side)
+    c = _resize_max_side(c, max_side)
+
+    # 🔹 Focus ORB on the central facade region (reduce sky/grass influence)
+    q = _central_crop(q, frac=0.85)
+    c = _central_crop(c, frac=0.85)
+
+    # Convert to grayscale for ORB
+    qg = cv2.cvtColor(q, cv2.COLOR_RGB2GRAY)
+    cg = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+
+    # Detect ORB keypoints + descriptors
     orb = cv2.ORB_create(1000)
     kq, dq = orb.detectAndCompute(qg, None)
     kc, dc = orb.detectAndCompute(cg, None)
-    if dq is None or dc is None or len(kq) < 20 or len(kc) < 20: return 0.0
+
+    if dq is None or dc is None or len(kq) < 20 or len(kc) < 20:
+        return 0.0
+
+    # KNN match with Lowe ratio test
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     matches = bf.knnMatch(dq, dc, k=2)
     good = [m for m, n in matches if m.distance < 0.75 * n.distance]
-    if len(good) < 12: return 0.0
+
+    if len(good) < 12:
+        return 0.0
+
+    # Estimate homography and count inliers
     src = np.float32([kq[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst = np.float32([kc[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
     H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
-    if H is None or mask is None: return 0.0
+
+    if H is None or mask is None:
+        return 0.0
+
     inliers = int(mask.sum())
     denom = max(1, min(len(kq), len(kc)))
     return float(inliers) / float(denom)
+
+
 
 def nms_boxes(dets, iou_thr=0.30):
     if not dets:
@@ -876,9 +929,9 @@ def draw_semantic_overlay(pil_img, dets, alpha=0.35):
 def retrieve_verified_multiview(
     image_path: str,
     index_npz: str,
-    base_threshold: float = 0.28,
-    inlier_floor: float = 0.05,
-    inlier_strong: float = 0.14,
+    base_threshold: float = 0.22,
+    inlier_floor: float = 0.03,
+    inlier_strong: float = 0.10,
     alpha: float = 0.80,
     k_per_facade: int = 3,
     k_global: int = 30,
@@ -1301,10 +1354,36 @@ def build_overall_beauty_line(score: float, figsize=(10, 4), lang: str = "en") -
     fig.tight_layout()
     return fig_to_pil(fig, dpi=300)
 
-def build_aesthetic_viz(norms, composite_index_0_5, figsize=(8, 6)):
+# def build_aesthetic_viz(norms, composite_index_0_5, figsize=(8, 6)):
+#     """
+#     Only show the radar chart of 6 core features (0–1).
+#     The overall index is already shown elsewhere, so we don't draw a second bar here.
+#     """
+#     labels = ["Vert Sym", "Rot Sym", "Proportion", "Win/Wall", "Rhythm", "Fractal"]
+
+#     # close the radar polygon
+#     vals = norms + [norms[0]]
+#     angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False)
+#     angles = np.concatenate([angles, angles[:1]])
+
+#     fig = plt.figure(figsize=figsize)
+#     ax = plt.subplot(1, 1, 1, polar=True)
+
+#     ax.plot(angles, vals, linewidth=3)
+#     ax.fill(angles, vals, alpha=0.30)
+#     ax.set_xticks(np.linspace(0, 2 * np.pi, len(labels), endpoint=False))
+#     ax.set_xticklabels(labels, fontsize=12)
+#     ax.set_ylim(0, 1)
+#     ax.grid(True, linewidth=0.8)
+#     ax.set_title("Aesthetic feature profile (0–1)", fontsize=13)
+
+#     fig.tight_layout()
+#     return fig_to_pil(fig, dpi=300)
+
+def build_aesthetic_viz(norms, composite_index_0_5, figsize=(5, 4)):
     """
-    Only show the radar chart of 6 core features (0–1).
-    The overall index is already shown elsewhere, so we don't draw a second bar here.
+    Only show the radar chart of 6 core features (0–1), in a smaller size
+    so it doesn't dominate the UI.
     """
     labels = ["Vert Sym", "Rot Sym", "Proportion", "Win/Wall", "Rhythm", "Fractal"]
 
@@ -1316,16 +1395,17 @@ def build_aesthetic_viz(norms, composite_index_0_5, figsize=(8, 6)):
     fig = plt.figure(figsize=figsize)
     ax = plt.subplot(1, 1, 1, polar=True)
 
-    ax.plot(angles, vals, linewidth=3)
-    ax.fill(angles, vals, alpha=0.30)
+    ax.plot(angles, vals, linewidth=2)
+    ax.fill(angles, vals, alpha=0.25)
     ax.set_xticks(np.linspace(0, 2 * np.pi, len(labels), endpoint=False))
-    ax.set_xticklabels(labels, fontsize=12)
+    ax.set_xticklabels(labels, fontsize=10)
     ax.set_ylim(0, 1)
     ax.grid(True, linewidth=0.8)
-    ax.set_title("Aesthetic feature profile (0–1)", fontsize=13)
+    ax.set_title("Aesthetic feature profile (0–1)", fontsize=11)
 
     fig.tight_layout()
-    return fig_to_pil(fig, dpi=300)
+    # lower dpi → fewer pixels → smaller file + visual footprint
+    return fig_to_pil(fig, dpi=180)
 
 
 
@@ -2228,7 +2308,7 @@ def run_facade_analysis(
             matched_card, combined, dbg = retrieve_verified_multiview(
                 tmp_image_path,
                 str(IDX_PATH),
-                base_threshold=0.30,
+                base_threshold=0.22,
             )
             if matched_card:
                 verified_card = matched_card
@@ -2256,7 +2336,9 @@ def run_facade_analysis(
 
     # ---------- aesthetic viz + explanation ----------
     st.markdown("### Aesthetic Visualization / 美學視覺化")
-    st.image(viz_img, caption="Feature profile and score makeup", width='stretch')
+    orig_w, orig_h = viz_img.size
+    smaller = viz_img.resize((400, 400), Image.LANCZOS)
+    st.image(smaller, caption="Feature profile and score makeup", width=400)
 
     with st.spinner("Explaining the chart..."):
         chart_explanation = chart_explainer_pollinations(
