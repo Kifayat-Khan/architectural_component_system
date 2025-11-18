@@ -2485,7 +2485,7 @@ if page == "Analysis":
             num_cols = min(4, len(valid_paths))  # up to 4 per row
             cols = st.columns(num_cols)
 
-            for i, img_path in enumerate(valid_paths):
+            for i, img_path in enumerate(valid_paths[:4]):
                 col = cols[i % num_cols]
                 # smaller display; click opens larger preview
                 col.image(
@@ -2493,6 +2493,7 @@ if page == "Analysis":
                     width='stretch',
                     caption=f"View {i+1}" if LANG != "zh" else f"视角 {i+1}",
                 )
+                
 
         # 4) Build DB info text and generate *guide-style* narrative
    
