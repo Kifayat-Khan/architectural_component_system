@@ -41,7 +41,7 @@ from qrcode.image.pil import PilImage
 
 # --------- Runtime knobs (variables; no env) ----------
 NUM_THREADS     = 4
-MAX_SIDE        = 1024
+MAX_SIDE        = 1400
 CACHE_TTL_MIN   = 240
 API_BASE        = "https://text.pollinations.ai"   # free text endpoint
 API_MODEL       = "gpt-4o-mini"                    # not used directly; Pollinations picks model
@@ -289,9 +289,15 @@ def load_cards_jsonl(path: str) -> List[Dict[str, Any]]:
 
 def _read_image_rgb(path: str):
     try:
-        return cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
+        data = np.fromfile(path, dtype=np.uint8)
+        # Try reduced decode first (quarter size); fall back to full if needed
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR | cv2.IMREAD_REDUCED_COLOR_2)
+        if img is None:
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     except Exception:
         return None
+
 
 def _resize_max_side(img: np.ndarray, max_side: int = 720) -> np.ndarray:
     h, w = img.shape[:2]
@@ -799,6 +805,55 @@ if page == "Database Manager":
 # =========================
 
 # ---------- small image helpers ----------
+# --- Big image safety knobs ---
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Allow big pixel count but we still downscale right away:
+Image.MAX_IMAGE_PIXELS = None
+
+def _save_resized_jpeg_from_upload(up_file, out_dir: Path, max_side: int = 2200, quality: int = 85) -> Path:
+    """
+    Streams the uploaded file to disk, opens once, downsizes to max_side,
+    saves as optimized JPEG to keep memory low. Returns final JPEG path.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_dir / f"__raw_{int(time.time()*1000)}_{up_file.name}"
+    final_path = out_dir / f"{Path(up_file.name).stem}.jpg"
+
+    # 1) stream to disk (no giant bytes in memory)
+    with tmp_path.open("wb") as f:
+        for chunk in iter(lambda: up_file.read(1024*1024), b""):
+            f.write(chunk)
+
+    # 2) open once, downscale aggressively
+    with Image.open(tmp_path) as im:
+        im = im.convert("RGB")
+        # Optional hint for very big JPEGs (may be ignored for PNG):
+        try:
+            im.draft("RGB", (max_side, max_side))
+        except Exception:
+            pass
+        im.thumbnail((max_side, max_side*10000), Image.LANCZOS)
+        im.save(final_path, format="JPEG", quality=quality, optimize=True, subsampling=1)
+
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return final_path
+
+def _read_bytes(path: Path) -> bytes:
+    with path.open("rb") as f:
+        return f.read()
+
+def _sha1_of_file(path: Path) -> str:
+    h = hashlib.sha1()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024*1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def pil_from_upload(up):
     return Image.open(io.BytesIO(up.read())).convert("RGB")
 
@@ -2552,12 +2607,37 @@ if page == "Analysis":
         
    
     # --- 1) normal upload path (can reuse same function) ---
+    # uploaded = st.file_uploader(
+    #     "Upload Building Facade Image / 上传建筑立面图片",
+    #     type=["jpg", "jpeg", "png"],
+    #     accept_multiple_files=True,
+    #     key=f"{KEY_NS}_uploader",
+    # )
+
     uploaded = st.file_uploader(
         "Upload Building Facade Image / 上传建筑立面图片",
-        type=["jpg", "jpeg", "png"],
+        type=["jpg","jpeg","png"],
         accept_multiple_files=True,
-        key=f"{KEY_NS}_uploader",
+        key=f"{KEY_NS}_analysis_upload"
     )
+
+    if uploaded:
+        for f in uploaded:
+            # Stream to disk + resize to safe JPEG
+            safe_path = _save_resized_jpeg_from_upload(f, Path("uploads"), max_side=MAX_SIDE if MAX_SIDE <= 2200 else 2200)
+            raw = _read_bytes(safe_path)
+
+            # Stable label + cache key by hash
+            file_hash = _sha1_of_file(safe_path)[:10]
+            label = f"Uploaded: {f.name} ({file_hash})"
+
+            run_facade_analysis(
+                raw=raw,
+                label=label,
+                known_card=None,
+                source_id=f"upload_{file_hash}"
+            )
+
     st.markdown("---")
     # --- 2) optional search-by-name ---
     st.markdown("#### Search by building name (optional) / 按建筑物名称搜索（可选）")
