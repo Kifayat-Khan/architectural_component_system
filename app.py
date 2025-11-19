@@ -805,6 +805,7 @@ if page == "Database Manager":
 # =========================
 
 # ---------- small image helpers ----------
+
 # --- Big image safety knobs ---
 from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -2476,6 +2477,230 @@ def run_facade_analysis(
 #--analysis part method end 
 # ---------------- Main Analysis ----------------
 
+# if page == "Analysis":
+#     ensure_index(str(CARDS_PATH), str(IDX_PATH))
+
+#     # ---- 1) QR / direct ID lookup via URL query params ----
+#     # Example QR URL:
+#     #   https://your-app-url/?id=tch-001
+#     #   https://your-app-url/?facade=tch-001
+#     #   https://your-app-url/?facade_id=tch-001
+#     params = st.query_params  # ✅ new API, replaces st.experimental_get_query_params()
+
+#     qr_id = None
+#     for key in ("id", "facade", "facade_id"):
+#         if key in params:
+#             v = params[key]
+#             if isinstance(v, (list, tuple)):
+#                 qr_id = (v[0] or "").strip()
+#             else:
+#                 qr_id = str(v).strip()
+#             break
+
+#     if qr_id:
+#         # 1) Load DB and find the matching card by id / English name / Chinese name
+#         cards = load_cards_jsonl(str(CARDS_PATH))
+#         card = None
+#         for c in cards:
+#             cid     = str(c.get("id", "")).strip()
+#             name_en = (c.get("name") or "").strip()
+#             name_zh = (c.get("name_zh") or "").strip()
+#             if qr_id == cid or qr_id == name_en or (name_zh and qr_id == name_zh):
+#                 card = c
+#                 break
+
+#         if not card:
+#             st.error(
+#                 "This building is not in our database yet."
+#                 if LANG != "zh" else
+#                 "此建筑尚未收录在数据库中。"
+#             )
+#             st.stop()
+
+#         # 2) Title: EN + ZH if available
+#         title_line = card.get("name", "")
+#         if card.get("name_zh"):
+#             title_line += f" / {card['name_zh']}"
+#         st.header(title_line)
+
+#         # 3) Show ALL available images as a small thumbnail gallery
+#         imgs = card.get("images") or []
+#         if not imgs and card.get("image"):  # legacy single image
+#             imgs = [card["image"]]
+
+#         valid_paths = [str(Path(p)) for p in imgs if p and Path(p).exists()]
+
+#         if valid_paths:
+#             st.markdown(
+#                 "### Facade views / 立面视图"
+#                 if LANG != "zh" else
+#                 "### 立面视图"
+#             )
+
+#             # thumbnails in a grid; each image is clickable to enlarge
+#             num_cols = min(4, len(valid_paths))  # up to 4 per row
+#             cols = st.columns(num_cols)
+
+#             for i, img_path in enumerate(valid_paths[:4]):
+#                 col = cols[i % num_cols]
+#                 # smaller display; click opens larger preview
+#                 col.image(
+#                     img_path,
+#                     width='stretch',
+#                     caption=f"View {i+1}" if LANG != "zh" else f"视角 {i+1}",
+#                 )
+                
+
+#         # 4) Build DB info text and generate *guide-style* narrative
+   
+#         db_info = _make_info(card)
+
+#         guide_text = generate_qr_guide_text(
+#             db_info=db_info,
+#             lang=LANG,
+#             image_data_url=None  # no need to send image for this
+#         )
+
+#         st.markdown(
+#             "### Building Guide / 建筑导览"
+#             if LANG != "zh" else
+#             "### 建筑导览说明"
+#         )
+#         st.write(guide_text)
+
+#         # ---------- 5) Q&A — based ONLY on db_info ----------
+#         st.markdown("### Ask / 问" if LANG != "zh" else "### 提问")
+
+#         # stable id for this QR page
+#         source_id = card.get("id", qr_id)
+
+#         user_q = st.text_input(
+#             "Ask a question about this building"
+#             if LANG != "zh" else
+#             "请就此建筑提问",
+#             key=f"{KEY_NS}_qr_qa_{source_id}",
+#         )
+
+#         if user_q:
+#             info_text = db_info  # use the card info we already built
+#             if info_text:
+#                 ans = answer_building_question(info_text, user_q, lang=LANG)
+
+#                 if ans.strip().upper().startswith("NOTFOUND"):
+#                     st.warning(
+#                         "Sorry, that detail is not in the current building information."
+#                         if LANG != "zh" else
+#                         "抱歉，在当前建筑信息中没有这一条具体内容。"
+#                     )
+#                 else:
+#                     st.success(ans)
+#             else:
+#                 st.warning(
+#                     "No building info available for Q&A."
+#                     if LANG != "zh" else
+#                     "目前没有可用于问答的建筑信息。"
+#                 )
+
+#         # 6) Stop: QR page should NOT fall through to upload UI
+#         st.stop()
+
+
+        
+   
+#     # --- 1) normal upload path (can reuse same function) ---
+#     # uploaded = st.file_uploader(
+#     #     "Upload Building Facade Image / 上传建筑立面图片",
+#     #     type=["jpg", "jpeg", "png"],
+#     #     accept_multiple_files=True,
+#     #     key=f"{KEY_NS}_uploader",
+#     # )
+
+#     uploaded = st.file_uploader(
+#         "Upload Building Facade Image / 上传建筑立面图片",
+#         type=["jpg","jpeg","png"],
+#         accept_multiple_files=True,
+#         key=f"{KEY_NS}_analysis_upload"
+#     )
+
+#     if uploaded:
+#         for f in uploaded:
+#             # Stream to disk + resize to safe JPEG
+#             safe_path = _save_resized_jpeg_from_upload(f, Path("uploads"), max_side=MAX_SIDE if MAX_SIDE <= 2200 else 2200)
+#             raw = _read_bytes(safe_path)
+
+#             # Stable label + cache key by hash
+#             file_hash = _sha1_of_file(safe_path)[:10]
+#             label = f"Uploaded: {f.name} ({file_hash})"
+
+#             run_facade_analysis(
+#                 raw=raw,
+#                 label=label,
+#                 known_card=None,
+#                 source_id=f"upload_{file_hash}"
+#             )
+
+#     st.markdown("---")
+#     # --- 2) optional search-by-name ---
+#     st.markdown("#### Search by building name (optional) / 按建筑物名称搜索（可选）")
+#     name_query = st.text_input(
+#         "Type building name (e.g. 'National Taichung Theater') / 建筑物名称（例如“台中国家剧院”）",
+#         key=f"{KEY_NS}_name_search",
+#     )
+
+#     if name_query:
+#         cards = load_cards_jsonl(str(CARDS_PATH))
+#         matches = [c for c in cards if card_matches_name_query(c, name_query)]
+
+#         if not matches:
+#             st.warning("This building name does not exist in our database.")
+#         else:
+#             if len(matches) == 1:
+#                 selected_card = matches[0]
+#             else:
+#                 options = [c["name"] for c in matches]
+#                 chosen = st.selectbox(
+#                     "Multiple matches found – choose one:",
+#                     options,
+#                     key=f"{KEY_NS}_name_choice",
+#                 )
+#                 selected_card = next(c for c in matches if c["name"] == chosen)
+
+#             img_path = pick_best_image(selected_card)
+#             if not img_path:
+#                 st.warning("This building is in the database but has no usable images.")
+#             else:
+#                 with open(img_path, "rb") as f:
+#                     raw = f.read()
+#                 # ONE call, same pipeline as upload
+#                 run_facade_analysis(
+#                     raw,
+#                     label=f"{selected_card.get('name','(from DB)')} (from database)",
+#                     known_card=selected_card,
+#                     source_id=selected_card.get("id", "db_facade"),
+#                 )
+
+   
+
+
+
+#     if uploaded:
+#         for up in uploaded:
+#             raw = up.read()
+#             # here we DON'T know the card, so known_card=None
+#             run_facade_analysis(
+#                 raw,
+#                 label=up.name,
+#                 known_card=None,
+#                 source_id=Path(up.name).stem,
+#             )
+
+# ---- helpers ----
+def _clear_name_search_state():
+    for k in (f"{KEY_NS}_name_search", f"{KEY_NS}_name_choice"):
+        if k in st.session_state:
+            st.session_state[k] = ""
+
+# ------------------ ANALYSIS PAGE ------------------
 if page == "Analysis":
     ensure_index(str(CARDS_PATH), str(IDX_PATH))
 
@@ -2551,7 +2776,7 @@ if page == "Analysis":
                 
 
         # 4) Build DB info text and generate *guide-style* narrative
-   
+
         db_info = _make_info(card)
 
         guide_text = generate_qr_guide_text(
@@ -2603,31 +2828,27 @@ if page == "Analysis":
         # 6) Stop: QR page should NOT fall through to upload UI
         st.stop()
 
-
-        
-   
-    # --- 1) normal upload path (can reuse same function) ---
-    # uploaded = st.file_uploader(
-    #     "Upload Building Facade Image / 上传建筑立面图片",
-    #     type=["jpg", "jpeg", "png"],
-    #     accept_multiple_files=True,
-    #     key=f"{KEY_NS}_uploader",
-    # )
-
+    # ---------- 1) Upload OR Name (choose one) ----------
+    # Upload control
     uploaded = st.file_uploader(
         "Upload Building Facade Image / 上传建筑立面图片",
         type=["jpg","jpeg","png"],
         accept_multiple_files=True,
-        key=f"{KEY_NS}_analysis_upload"
+        key=f"{KEY_NS}_analysis_upload",
     )
 
-    if uploaded:
+    if uploaded:  # UPLOAD MODE
+        # ensure the name search gets cleared/ignored
+        _clear_name_search_state()
+
         for f in uploaded:
-            # Stream to disk + resize to safe JPEG
-            safe_path = _save_resized_jpeg_from_upload(f, Path("uploads"), max_side=MAX_SIDE if MAX_SIDE <= 2200 else 2200)
+            # read once, process once
+            safe_path = _save_resized_jpeg_from_upload(
+                f, Path("uploads"),
+                max_side=MAX_SIDE if MAX_SIDE <= 2200 else 2200
+            )
             raw = _read_bytes(safe_path)
 
-            # Stable label + cache key by hash
             file_hash = _sha1_of_file(safe_path)[:10]
             label = f"Uploaded: {f.name} ({file_hash})"
 
@@ -2635,12 +2856,16 @@ if page == "Analysis":
                 raw=raw,
                 label=label,
                 known_card=None,
-                source_id=f"upload_{file_hash}"
+                source_id=f"upload_{file_hash}",
             )
 
+        # stop here so the name UI never renders on the same pass
+        st.stop()
+
+    # ---------- 2) Name search ONLY if nothing uploaded ----------
     st.markdown("---")
-    # --- 2) optional search-by-name ---
     st.markdown("#### Search by building name (optional) / 按建筑物名称搜索（可选）")
+
     name_query = st.text_input(
         "Type building name (e.g. 'National Taichung Theater') / 建筑物名称（例如“台中国家剧院”）",
         key=f"{KEY_NS}_name_search",
@@ -2670,25 +2895,15 @@ if page == "Analysis":
             else:
                 with open(img_path, "rb") as f:
                     raw = f.read()
-                # ONE call, same pipeline as upload
                 run_facade_analysis(
-                    raw,
+                    raw=raw,
                     label=f"{selected_card.get('name','(from DB)')} (from database)",
                     known_card=selected_card,
                     source_id=selected_card.get("id", "db_facade"),
                 )
 
-   
-
-
-
-    if uploaded:
-        for up in uploaded:
-            raw = up.read()
-            # here we DON'T know the card, so known_card=None
-            run_facade_analysis(
-                raw,
-                label=up.name,
-                known_card=None,
-                source_id=Path(up.name).stem,
-            )
+    # ⚠️ Remove this duplicate block from your code:
+    # if uploaded:
+    #     for up in uploaded:
+    #         raw = up.read()
+    #         run_facade_analysis(raw, label=up.name, known_card=None, source_id=Path(up.name).stem)
