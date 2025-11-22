@@ -241,7 +241,7 @@ with st.sidebar:
     st.header("Settings")
     lang_choice = st.selectbox(
         "Language / 語言",
-        ["English", "中文 (简体)"],
+        ["English", "中文（繁體）"],
         index=0,
         key=f"{KEY_NS}_lang"
     )
@@ -573,24 +573,26 @@ def generate_qr_guide_text(
 
     if lang == "zh":
         system_text = (
-            "你是一位在台湾带团的建筑导览员，正在为游客介绍眼前的建筑。"
-            "语气要：亲切、清楚、具有教学性，但不要太学术，也不要太幼稚。\n"
-            "重要规则：\n"
-            "1. 只能根据提供的建筑信息来讲解，禁止编造新的具体事实（例如材料、年代、建筑师、用途等）。\n"
-            "2. 不要说“这张图片中你可以看到”“如图所示”等元话语，只假设游客正站在建筑前面。\n"
-            "3. 不要打招呼（不要用“大家好”“欢迎各位”之类）。\n"
-            "4. 用简单的中文说明建筑在哪里、属于什么年代/风格、有怎样的体量和立面特征，"
-            "以及它在城市或文化中的意义，适合普通游客和学生理解。"
+            "你是一位在臺灣帶團的建築導覽員，正在為遊客介紹眼前的建築。"
+            "語氣要親切、清楚、具教學性，但不要太學術，也不要太幼稚。\n"
+            "重要規則：\n"
+            "1. 只能根據提供的建築資訊來講解，禁止編造新的具體事實（例如材料、年代、建築師、用途等）。\n"
+            "2. 不要說「這張圖片中你可以看到」「如圖所示」等元話語，只假設遊客正站在建築前面。\n"
+            "3. 不要打招呼（不要用「大家好」「歡迎各位」之類）。\n"
+            "4. 用簡單的中文說明建築在哪裡、屬於什麼年代或風格、有怎樣的體量和立面特徵，"
+            "以及它在城市或文化中的意義，適合一般遊客和學生理解。"
         )
         prompt = (
-            "以下是数据库中的建筑信息，请你把它转化为现场导览用的说明文字：\n"
+            "以下是資料庫中的建築資訊，請你把它轉化為現場導覽用的說明文字：\n"
             f"{db_info}\n\n"
-            "请写 2–3 小段简短文字：\n"
-            "第 1 段：介绍建筑的名称、位置、年代和大致用途，以及它为什么重要（例如是地标、文化据点、保存再利用等）。\n"
-            "第 2 段：用简单的词，帮游客“看懂”这个立面的主要特点，比如体量、材料、颜色、屋顶或立面构成方式，"
-            "以及和历史或当地生活的关系。\n"
-            "如有需要，可以加第 3 段，说明游客在这里可以学习到什么建筑或文化概念。"
+            "請寫 2–3 小段簡短文字：\n"
+            "第 1 段：介紹建築的名稱、位置、年代和大致用途，以及它為什麼重要（例如是地標、文化據點、保存再利用等）。\n"
+            "第 2 段：用簡單的詞，幫遊客「看懂」這個立面的主要特點，比如體量、材料、顏色、屋頂或立面構成方式，"
+            "以及和歷史或在地生活的關係。\n"
+            "如有需要，可以加第 3 段，說明遊客在這裡可以學到什麼建築或文化概念。"
         )
+
+   
     else:
         system_text = (
             "You are a friendly on-site tour guide in Taichung, explaining a building to visitors. "
@@ -663,26 +665,26 @@ def _t_en_zh(en: str, zh: str, lang: str) -> str:
 
 def _db_labels(lang: str) -> dict:
     return {
-        "header":      _t_en_zh("📚 Building Database Manager", "📚 建筑数据库管理", lang),
+        "header":      _t_en_zh("📚 Building Database Manager", "📚 建築資料庫管理", lang),
         "info":        _t_en_zh("Add building entries for retrieval and grounding.",
-                                "添加建筑条目用于检索与叙事实据。", lang),
-        "name":        _t_en_zh("Building Name", "建筑名称", lang),          # ✅ THIS MUST EXIST
-        "location":    _t_en_zh("Location (City, Area)", "位置（城市、区域）", lang),
-        "era":         _t_en_zh("Era / Period", "时代 / 时期", lang),
-        "style":       _t_en_zh("Style", "风格", lang),
-        "massing":     _t_en_zh("Form / Massing", "形体 / 体量", lang),
-        "structure":   _t_en_zh("Structure", "结构", lang),
-        "condition":   _t_en_zh("Condition", "保存状况", lang),
-        "intro":       _t_en_zh("Introduction / Description", "简介 / 描述", lang),
-        "history":     _t_en_zh("History / Notes", "历史 / 备注", lang),
-        "materials":   _t_en_zh("Materials (comma-separated)", "材料（以英文逗号分隔）", lang),
-        "elements":    _t_en_zh("Elements (comma-separated)", "要素（以英文逗号分隔）", lang),
-        "upload":      _t_en_zh("Upload main facade image(s)", "上传立面主图（可多张）", lang),
-        "add_btn":     _t_en_zh("Add to Database", "添加到数据库", lang),
-        "err_name":    _t_en_zh("Name is required.", "请填写名称。", lang),
-        "indexing":    _t_en_zh("Indexing (lightweight)…", "正在建立索引（轻量）…", lang),
+                                "新增建築條目用於檢索與敘事佐證。", lang),
+        "name":        _t_en_zh("Building Name", "建築名稱", lang),
+        "location":    _t_en_zh("Location (City, Area)", "位置（城市、區域）", lang),
+        "era":         _t_en_zh("Era / Period", "時代 / 時期", lang),
+        "style":       _t_en_zh("Style", "風格", lang),
+        "massing":     _t_en_zh("Form / Massing", "形體 / 體量", lang),
+        "structure":   _t_en_zh("Structure", "結構", lang),
+        "condition":   _t_en_zh("Condition", "保存狀況", lang),
+        "intro":       _t_en_zh("Introduction / Description", "簡介 / 描述", lang),
+        "history":     _t_en_zh("History / Notes", "歷史 / 備註", lang),
+        "materials":   _t_en_zh("Materials (comma-separated)", "材料（以英文逗號分隔）", lang),
+        "elements":    _t_en_zh("Elements (comma-separated)", "要素（以英文逗號分隔）", lang),
+        "upload":      _t_en_zh("Upload main facade image(s)", "上傳立面主圖（可多張）", lang),
+        "add_btn":     _t_en_zh("Add to Database", "新增到資料庫", lang),
+        "err_name":    _t_en_zh("Name is required.", "請填寫名稱。", lang),
+        "indexing":    _t_en_zh("Indexing (lightweight)…", "正在建立索引（輕量）…", lang),
         "added_ok":    _t_en_zh("Added '{name}' and rebuilt index.",
-                                "已添加「{name}」并重建索引。", lang),
+                                "已新增「{name}」並重建索引。", lang),
     }
 
 
@@ -699,9 +701,10 @@ if page == "Database Manager":
         key=f"{KEY_NS}_dm_name_en"
     )
     name_zh  = st.text_input(
-        "建筑名称（中文，可选）" if LANG == "zh" else "Building Name (Chinese, optional)",
+        "建築名稱（中文，可選）" if LANG == "zh" else "Building Name (Chinese, optional)",
         key=f"{KEY_NS}_dm_name_zh"
     )
+
 
     location  = st.text_input(LBL["location"],  key=f"{KEY_NS}_dm_loc")
     era       = st.text_input(LBL["era"],       key=f"{KEY_NS}_dm_era")
@@ -782,8 +785,9 @@ if page == "Database Manager":
             st.caption(
                 "QR code for this building (scan to open guide page):"
                 if LANG != "zh" else
-                "建筑二维码（扫码打开导览页面）："
+                "建築 QR Code（掃碼打開導覽頁面）："
             )
+
             st.image(qr_path, width=180)
 
             # Show the URL text (optional but useful for debugging/printing)
@@ -1403,7 +1407,7 @@ def build_overall_beauty_line(score: float, figsize=(10, 4), lang: str = "en") -
     ax.plot([1.0], [score], marker="o", markersize=8)
     ax.fill_between(x, 0, y, alpha=0.15)
     ax.axhline(score, linestyle="--", linewidth=1, alpha=0.5)
-    title = "Overall Facade Beauty (0–1)" if lang != "zh" else "立面总体美度（0–1）"
+    title = "Overall Facade Beauty (0–1)" if lang != "zh" else "立面總體美度（0–1）"
     ax.set_title(title); ax.set_xlabel("Overall index"); ax.set_ylabel("Beauty score")
     ax.set_xticks([0.0, 0.5, 1.0]); ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0]); ax.grid(True, linestyle=":", alpha=0.6)
     ax.text(1.0, score, f"{score:.2f}", va="bottom", ha="right", fontsize=10, weight="bold")
@@ -1602,19 +1606,20 @@ def answer_building_question(db_info: str, question: str, lang: str = "en") -> s
 
     if lang == "zh":
         sys = (
-            "你是这座建筑的专业导览员，只能根据提供的建筑资料回答问题。"
-            "请用语义理解匹配不同问法，例如：\n"
-            " - “哪一年建成”“什么时候建造”“何时开放” 都归为时间问题；\n"
-            " - “建筑风格是什么”“属于哪种类型” 都归为风格问题；\n"
-            " - “有什么用途”“做什么用的” 是功能问题；\n"
-            " - “在哪一区”“位于什么地方” 是位置问题；\n"
-            " - “用什么材料”“立面是什么做的” 是材料/结构问题。\n"
-            "如果资料只给出大概信息（如“1930年代”“民间艺术环境”等），"
-            "问题问得更具体时，仍然使用这些大概信息作答，并可以说明是大致年代或概括类别。\n"
-            "只有在资料中完全找不到与问题相关的内容时，才回答：NOTFOUND。\n"
-            "绝对不要编造资料中没有的年份、人物、数字或事件。"
+            "你是這座建築的專業導覽員，只能根據提供的建築資料回答問題。"
+            "請用語義理解來匹配不同問法，例如：\n"
+            " - 「哪一年建成」「什麼時候建造」「何時開放」都歸為時間問題；\n"
+            " - 「建築風格是什麼」「屬於哪種類型」都歸為風格問題；\n"
+            " - 「有什麼用途」「做什麼用的」是功能問題；\n"
+            " - 「在哪一區」「位於什麼地方」是位置問題；\n"
+            " - 「用什麼材料」「立面是什麼做的」是材料或結構問題。\n"
+            "如果資料只給出大概資訊（如「1930 年代」「民間藝術環境」等），"
+            "當問題問得更具體時，仍然使用這些大概資訊作答，並可以說明是大致年代或概括類別。\n"
+            "只有在資料中完全找不到與問題相關的內容時，才回答：NOTFOUND。\n"
+            "絕對不要編造資料中沒有的年份、人物、數字或事件。"
         )
-        tail = "请用一到两句话简洁回答。"
+        tail = "請用一到兩句話簡潔回答。"
+
     else:
         sys = (
             "You are a professional guide for THIS ONE building. "
@@ -1725,32 +1730,33 @@ def generate_facade_narrative_pollinations(
 
     if lang == "zh":
         system_text = (
-            "你是一位在城市中为游客讲解的资深建筑师兼导览员。"
-            "风格：专业、清晰、有教学性，但不要像论文。\n"
-            "【硬性规则】\n"
-            "1. 你只能根据 [建筑事实] 中提供的信息来给出具体描述。"
-            "   不得编造新的建筑名称、城市、年代、设计师、用途或材料。\n"
-            "2. 如果 [建筑事实] 中有建筑名称，你必须使用该名称；如果没有，只能称为“这座建筑”或“该建筑”。\n"
-            "3. 不要使用“欢迎大家”“今天我要介绍”等开场问候，也不要说“如图所示”“这张图片里”。\n"
-            "4. [立面指标概况] 只用于帮助你判断：例如“比较对称 / 不太对称”“窗洞偏多 / 偏少”“节奏感强 / 较弱”。"
-            "   不要在答案中写出任何具体数字。\n"
-            "5. 只描述立面和紧邻的室外空间，不要描述室内。"
+            "你是一位在城市中為遊客講解的資深建築師兼導覽員。"
+            "風格應專業、清楚、有教學性，但不要像論文。\n"
+            "【硬性規則】\n"
+            "1. 你只能根據〔建築事實〕中提供的資訊來給出具體描述，"
+            "   不得編造新的建築名稱、城市、年代、設計師、用途或材料。\n"
+            "2. 如果〔建築事實〕中有建築名稱，你必須使用該名稱；如果沒有，只能稱為「這座建築」或「該建築」。\n"
+            "3. 不要使用「歡迎大家」「今天我要介紹」等開場問候，也不要說「如圖所示」「這張圖片裡」。\n"
+            "4.〔立面指標概況〕只用來幫助你判斷，例如「比較對稱或不太對稱」「窗洞偏多或偏少」「節奏感較強或較弱」，"
+            "   不要在答案中寫出任何具體數字。\n"
+            "5. 只描述立面和緊鄰的室外空間，不要描述室內。"
         )
 
         user_prompt = (
-            "下面是这座建筑可用的事实信息：\n"
-            f"[建筑事实]\n{db_text}\n\n"
-            "下面是立面指标的简要概况（包含数字，只供你内部参考，回答时不要写出具体数字）：\n"
-            f"[立面指标概况]\n{ctx}\n\n"
-            "任务：写出 3 段面向游客和学生的导览讲解：\n"
-            "第 1 段：基于 [建筑事实] 介绍建筑的名称、所在城市/区域、年代和风格，如果有 intro 或 history，"
-            "请用 1–2 句提到至少一个具体事实（例如设计者、开放年份、改造背景等）。\n"
-            "第 2 段：结合风格、体量（massing）、[建筑事实] 中列出的材料和要素，再加上 [立面指标概况]，"
-            "说明立面的组织方式：大致是否对称、窗洞大致多还是少、节奏感和重复感如何、整体感觉偏开放还是扎实。\n"
-            "第 3 段：从游客和学生的角度，总结站在这座建筑前可以学到哪些建筑概念，例如对称、节奏、比例、"
-            "城市地标性、历史与当代的叠加或再利用等。\n"
-            "注意：不要使用任何欢迎语，不要提到“图像、照片、这张图”等字眼。"
+            "下面是這座建築可用的事實資訊：\n"
+            f"[建築事實]\n{db_text}\n\n"
+            "下面是立面指標的簡要概況（包含數字，只供你內部參考，回答時不要寫出具體數字）：\n"
+            f"[立面指標概況]\n{ctx}\n\n"
+            "任務：寫出 3 段面向遊客和學生的導覽講解：\n"
+            "第 1 段：根據〔建築事實〕介紹建築的名稱、所在城市或區域、年代和風格，如果有 intro 或 history，"
+            "請用 1–2 句提到至少一項具體事實（例如設計者、開放年份、改造背景等）。\n"
+            "第 2 段：結合風格、體量（massing）、〔建築事實〕中列出的材料和要素，再加上〔立面指標概況〕，"
+            "說明立面的組織方式：大致是否對稱、窗洞大致多還是少、節奏感和重複感如何、整體感覺偏開放還是紮實。\n"
+            "第 3 段：從遊客和學生的角度，總結站在這座建築前可以學到哪些建築概念，例如對稱、節奏、比例、"
+            "城市地標性、歷史與當代的疊加或再利用等。\n"
+            "注意：不要使用任何歡迎語，不要提到「圖像、照片、這張圖」等字眼。"
         )
+
 
     else:
         system_text = (
@@ -1816,24 +1822,25 @@ def chart_explainer_pollinations(
 
     if lang == "zh":
         system_text = (
-            "你是一位在博物馆里讲解建筑图表的老师，听众包括家庭游客和小学生。\n"
+            "你是一位在博物館裡講解建築圖表的老師，聽眾包括家庭遊客和小學生。\n"
             "要求：\n"
-            "1. 语言非常简单、口语化，每条尽量 1–2 句。\n"
-            "2. 不要在回答中写出任何数字或百分比，也不要用“指数、FFT、分形”等术语。\n"
-            "3. 不要编造新的建筑名称或历史，只能在 [建筑事实] 的范围内概括。\n"
-            "4. 每一点都要告诉孩子和游客：可以看立面的哪一部分来观察这个特点。"
+            "1. 語言要非常簡單、口語化，每條盡量 1–2 句。\n"
+            "2. 不要在回答中寫出任何數字或百分比，也不要用「指數、FFT、分形」等術語。\n"
+            "3. 不要編造新的建築名稱或歷史，只能在〔建築事實〕的範圍內概括。\n"
+            "4. 每一點都要告訴孩子和遊客：可以看立面的哪一部分來觀察這個特點。"
         )
 
         user_prompt = (
-            "【建筑事实】\n"
+            "【建築事實】\n"
             f"{db_text}\n\n"
-            "【立面指标概况】（包含数字，只给你参考，请不要在回答中写出数字）\n"
+            "【立面指標概況】（包含數字，只給你參考，請不要在回答中寫出數字）\n"
             f"{ctx}\n\n"
-            "请写出 4–6 条项目，每条用 “- ” 开头。\n"
-            "每条：\n"
-            "• 概括一个简单的观察点（例如：左右看起来比较平衡、窗户排成有规律的节奏、立面比较简单、细节比较丰富等）。\n"
-            "• 加一句很短的提示，让游客/孩子知道应该看哪里（比如“看看两边的窗户是不是差不多高”）。"
+            "請寫出 4–6 條項目，每條用「- 」開頭。\n"
+            "每條需要：\n"
+            "• 概括一個簡單的觀察點（例如：左右看起來比較平衡、窗戶排成有規律的節奏、立面比較簡單、細節比較豐富等）。\n"
+            "• 加一句很短的提示，讓遊客或孩子知道應該看哪裡（例如「看看兩邊的窗戶是不是差不多高」）。"
         )
+
 
     else:
         system_text = (
@@ -1983,12 +1990,13 @@ def chart_explainer_text_only(metrics: Dict[str, Any], lang="en") -> str:
     result_en = "\n".join(bullets_en)
 
     if lang == "zh":
-        # Translate to Simplified Chinese while keeping list formatting
+        # Translate to Traditional Chinese while keeping list formatting
         zh = _pollinations_chat(
-            f"Translate to Simplified Chinese. Keep '- ' bullet formatting:\n{result_en}",
+            f"Translate to Traditional Chinese. Keep '- ' bullet formatting:\n{result_en}",
             system_text="You are a precise translator."
         )
         return zh
+
 
     return result_en
 # =========================
@@ -2166,7 +2174,7 @@ def make_report(
 
     # Header
     c.setFont("STSong-Light", 16)
-    c.drawString(LM, y, "AI Analysis of Facade / 立面人工智能分析")
+    c.drawString(LM, y, "AI Analysis of Facade / 立面人工智慧分析")
     y -= 22
     c.setFont("STSong-Light", 10)
     c.drawString(LM, y, _t.strftime("Generated on / 生成于 %Y-%m-%d %H:%M:%S"))
@@ -2205,7 +2213,7 @@ def make_report(
     # Viz page
     c.showPage(); y = H - TOP
     c.setFont("STSong-Light", 12)
-    c.drawString(LM, y, "Aesthetic Visualization / 美学可视化")
+    c.drawString(LM, y, "Aesthetic Visualization / 美學可視化")
     y -= 8
     if viz_img is not None:
         w_draw = W - LM - RM
@@ -2213,7 +2221,7 @@ def make_report(
         y -= used_h + 16
 
         c.setFont("STSong-Light", 12)
-        c.drawString(LM, y, "Explanation / 解释")
+        c.drawString(LM, y, "Explanation / 解釋")
         y -= 14
         body_font = "STSong-Light" if lang=="zh" else "Helvetica"
         c.setFont(body_font, 10 if lang=="en" else 11)
@@ -2233,7 +2241,7 @@ def make_report(
         if y < BOT + 280:
             c.showPage(); y = H - TOP
         c.setFont("STSong-Light", 12)
-        c.drawString(LM, y, "Ten Principles of Beauty / 十大美学原则")
+        c.drawString(LM, y, "Ten Principles of Beauty / 十大美學原則")
         y -= 8
         if principles_img is not None:
             used_h = draw_img_fit_top(c, principles_img, LM, y, W - LM - RM)
@@ -2244,7 +2252,7 @@ def make_report(
         if y < BOT + 200:
             c.showPage(); y = H - TOP
             c.setFont("STSong-Light", 12)
-            c.drawString(LM, y, "Overall Beauty / 总体美度")
+            c.drawString(LM, y, "Overall Beauty / 總體美度")
             y -= 8
         used_h = draw_img_fit_top(c, overall_img, LM, y, W - LM - RM)
         y -= used_h + 10
@@ -2409,10 +2417,10 @@ def run_facade_analysis(
     st.markdown("#### Explanation / 解释")
     st.markdown(chart_explanation)
 
-    st.markdown("### Ten Principles of Beauty / 十大美学原则")
+    st.markdown("### Ten Principles of Beauty / 十大美學原則")
     st.image(principles_img, caption="Normalized 0–1 scores per principle", width='stretch')
 
-    st.markdown("### Overall Facade Beauty / 立面总体美度")
+    st.markdown("### Overall Facade Beauty / 立面總體美度")
     overall_img = build_overall_beauty_line(overall_beauty, lang=LANG)
     st.image(overall_img, caption=f"Overall beauty = {overall_beauty:.2f}", width='stretch')
     st.info(f"Overall Beauty (0–1): **{overall_beauty:.2f}**")
@@ -2423,9 +2431,9 @@ def run_facade_analysis(
 
  
     # ---------- Q&A ----------
-    st.markdown("### Ask / 问")
+    st.markdown("### Ask / 問")
     user_q = st.text_input(
-        "Ask a question about this building" if LANG != "zh" else "请就此建筑提问",
+        "Ask a question about this building" if LANG != "zh" else "請就此建築提問",
         key=f"{KEY_NS}_qa_{source_id}",
     )
 
@@ -2438,7 +2446,7 @@ def run_facade_analysis(
                 st.warning(
                     "Sorry, that detail is not in the current building information."
                     if LANG != "zh" else
-                    "抱歉，在当前建筑信息中没有这一条具体内容。"
+                    "抱歉，在目前建築資訊中沒有這一條具體內容。"
                 )
             else:
                 st.success(ans)
@@ -2446,7 +2454,7 @@ def run_facade_analysis(
             st.warning(
                 "No building info available for Q&A."
                 if LANG != "zh" else
-                "目前没有可用于问答的建筑信息。"
+                "目前沒有可用於問答的建築資訊。"
             )
 
 
@@ -2737,7 +2745,7 @@ if page == "Analysis":
             st.error(
                 "This building is not in our database yet."
                 if LANG != "zh" else
-                "此建筑尚未收录在数据库中。"
+                "此建築尚未收錄在資料庫中。"
             )
             st.stop()
 
@@ -2758,7 +2766,7 @@ if page == "Analysis":
             st.markdown(
                 "### Facade views / 立面视图"
                 if LANG != "zh" else
-                "### 立面视图"
+                "### 立面視圖"
             )
 
             # thumbnails in a grid; each image is clickable to enlarge
@@ -2771,7 +2779,7 @@ if page == "Analysis":
                 col.image(
                     img_path,
                     width='stretch',
-                    caption=f"View {i+1}" if LANG != "zh" else f"视角 {i+1}",
+                    caption=f"View {i+1}" if LANG != "zh" else f"視角 {i+1}",
                 )
                 
 
@@ -2788,12 +2796,12 @@ if page == "Analysis":
         st.markdown(
             "### Building Guide / 建筑导览"
             if LANG != "zh" else
-            "### 建筑导览说明"
+            "### 建築導覽說明"
         )
         st.write(guide_text)
 
         # ---------- 5) Q&A — based ONLY on db_info ----------
-        st.markdown("### Ask / 问" if LANG != "zh" else "### 提问")
+        st.markdown("### Ask / 問" if LANG != "zh" else "### 提問")
 
         # stable id for this QR page
         source_id = card.get("id", qr_id)
@@ -2801,7 +2809,7 @@ if page == "Analysis":
         user_q = st.text_input(
             "Ask a question about this building"
             if LANG != "zh" else
-            "请就此建筑提问",
+            "請就此建築提問",
             key=f"{KEY_NS}_qr_qa_{source_id}",
         )
 
@@ -2814,7 +2822,7 @@ if page == "Analysis":
                     st.warning(
                         "Sorry, that detail is not in the current building information."
                         if LANG != "zh" else
-                        "抱歉，在当前建筑信息中没有这一条具体内容。"
+                        "抱歉，在目前建築資訊中沒有這一條具體內容。"
                     )
                 else:
                     st.success(ans)
@@ -2822,7 +2830,7 @@ if page == "Analysis":
                 st.warning(
                     "No building info available for Q&A."
                     if LANG != "zh" else
-                    "目前没有可用于问答的建筑信息。"
+                    "目前沒有可用於問答的建築資訊。"
                 )
 
         # 6) Stop: QR page should NOT fall through to upload UI
@@ -2831,7 +2839,7 @@ if page == "Analysis":
     # ---------- 1) Upload OR Name (choose one) ----------
     # Upload control
     uploaded = st.file_uploader(
-        "Upload Building Facade Image / 上传建筑立面图片",
+        "Upload Building Facade Image / 上傳建築立面圖片",
         type=["jpg","jpeg","png"],
         accept_multiple_files=True,
         key=f"{KEY_NS}_analysis_upload",
@@ -2864,10 +2872,10 @@ if page == "Analysis":
 
     # ---------- 2) Name search ONLY if nothing uploaded ----------
     st.markdown("---")
-    st.markdown("#### Search by building name (optional) / 按建筑物名称搜索（可选）")
+    st.markdown("#### Search by building name (optional) / 按建築物名稱搜尋（可選）")
 
     name_query = st.text_input(
-        "Type building name (e.g. 'National Taichung Theater') / 建筑物名称（例如“台中国家剧院”）",
+        "Type building name (e.g. 'National Taichung Theater') /  建築物名稱（例如「台中國家歌劇院」",
         key=f"{KEY_NS}_name_search",
     )
 
