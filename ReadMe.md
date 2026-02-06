@@ -5,7 +5,10 @@ This system is developed to quickly document and analyze Taichung’s historic b
 
 
 # for installion 
-pip install -U streamlit pillow numpy scikit-image matplotlib reportlab opencv-python-headless \
-            transformers accelerate sentencepiece safetensors torch
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+
+
 
 streamlit run app.py

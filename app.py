@@ -43,8 +43,12 @@ from qrcode.image.pil import PilImage
 NUM_THREADS     = 4
 MAX_SIDE        = 1400
 CACHE_TTL_MIN   = 240
-API_BASE        = "https://text.pollinations.ai"   # free text endpoint
-API_MODEL       = "gpt-4o-mini"                    # not used directly; Pollinations picks model
+# API_BASE        = "https://text.pollinations.ai"   # free text endpoint
+# API_MODEL       = "gpt-4o-mini"                    # not used directly; Pollinations picks model
+OPENAI_API_BASE = "https://api.openai.com/v1"
+OPENAI_MODEL    = "gpt-4o-mini"   # you can change later if needed
+
+
 KEY_NS          = "acs_v3p"                        # widget key namespace
 
 REINDEX_IF_EMPTY = True
@@ -56,6 +60,19 @@ SHOW_HEATMAP_UI    = True    # SHOW heatmap image on page
 # If you ever want to speed up by skipping computation (PDF will also lose them if False):
 COMPUTE_OVERLAY    = True
 COMPUTE_HEATMAP    = True
+
+
+#---get api key 
+def _get_openai_key() -> str:
+    # Preferred: Streamlit secrets
+    try:
+        if "OPENAI_API_KEY" in st.secrets:
+            return str(st.secrets["OPENAI_API_KEY"]).strip()
+    except Exception:
+        pass
+
+    # Fallback: environment variable (recommended on Zeabur)
+    return (os.getenv("OPENAI_API_KEY") or "").strip()
 
 # --- fonts for PDF (CJK ready)
 pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
@@ -619,12 +636,18 @@ def generate_qr_guide_text(
             "Optional Paragraph 3: Explain what tourists and students can learn here about architecture or local culture."
         )
 
-    return _pollinations_chat(
+    # return _pollinations_chat(
+    #     prompt,
+    #     system_text=system_text,
+    #     image_data_url=image_data_url,
+    #     api_base=API_BASE,
+    # )
+    return _openai_chat(
         prompt,
         system_text=system_text,
         image_data_url=image_data_url,
-        api_base=API_BASE,
     )
+
 
 # --- helpers: image -> data URL (for multimodal chat) ---
 import base64
@@ -1479,116 +1502,177 @@ def normalize_features(sym_v, sym_r, ratio, w2w, rhythm, fractal):
     return [float(v) for v in (nv, nr, nrx, nww, nry, nfr)]
 
 # ---------- Pollinations client (text only) ----------
-def _pollinations_chat(
+# def _pollinations_chat(
+#     prompt: str,
+#     system_text: str | None = None,
+#     image_data_url: str | None = None,
+#     *,
+#     model: str | None = None,         # accepted but intentionally unused
+#     timeout_s: float = 30.0,
+#     api_base: str = "https://text.pollinations.ai",
+#     **_
+# ) -> str:
+#     """
+#     Pollinations client aligned with their docs:
+
+#     - Advanced: POST https://text.pollinations.ai/
+#       Sends system + user as OpenAI-style messages, no explicit model.
+#     - Simple fallback: GET https://text.pollinations.ai/{prompt}
+
+#     No local LLM; all text comes from Pollinations.
+#     """
+#     import requests
+#     from urllib.parse import quote
+#     import urllib.parse
+
+#     # ---- Build prompt, including image ref if any ----
+#     if image_data_url:
+#         prompt = (
+#             "You are given an image reference below. Use it in your analysis.\n"
+#             f"[IMAGE]: {image_data_url}\n\n{prompt}"
+#         )
+
+#     def _truncate(s: str | None, hard: int) -> str:
+#         if not s:
+#             return ""
+#         return (s[:hard] + " …[truncated]") if len(s) > hard else s
+
+#     user_text   = _truncate(prompt, 3500) 
+#     system_text = _truncate(system_text, 800)
+
+#     last_err = None
+
+#     # ---------- 1) Advanced: POST https://text.pollinations.ai/ ----------
+#     try:
+#         url = api_base.rstrip("/") + "/"
+#         payload = {
+#             "messages": [
+#                 {"role": "system", "content": system_text or ""},
+#                 {"role": "user",   "content": user_text or ""},
+#             ]
+#         }
+#         # Do NOT send "model" – let Pollinations choose a default.
+
+#         r = requests.post(
+#             url,
+#             json=payload,
+#             timeout=timeout_s,
+#             headers={"accept": "text/plain"}  # ask for plain text
+#         )
+
+#         if r.status_code == 200:
+#             ct = (r.headers.get("content-type") or "").lower()
+#             txt = (r.text or "").strip()
+
+#             # If server gives us plain text, just return it
+#             if txt and (ct.startswith("text/") or not ct):
+#                 return txt
+
+#             # If JSON, try to extract a string-ish field
+#             try:
+#                 js = r.json()
+#                 if isinstance(js, str):
+#                     return js.strip()
+#                 for k in ("response", "text", "output", "message"):
+#                     v = js.get(k)
+#                     if isinstance(v, str) and v.strip():
+#                         return v.strip()
+#             except Exception:
+#                 pass
+
+#             last_err = f"unexpected POST body (ct={ct}, len={len(r.text)})"
+#         else:
+#             last_err = f"POST / status {r.status_code}: {r.text[:200]}"
+#     except Exception as e:
+#         last_err = f"POST / exception: {e}"
+
+#     # ---------- 2) Simple fallback: GET https://text.pollinations.ai/{prompt} ----------
+#     try:
+#         # Combine system + user into one prompt for the simple GET API
+#         full_prompt = (
+#             (f"System:\n{system_text}\n\nUser:\n{user_text}")
+#             if system_text else user_text
+#         ) or ""
+
+#         url = f"{api_base.rstrip('/')}/{quote(full_prompt)}"
+#         r = requests.get(
+#             url,
+#             timeout=timeout_s,
+#             headers={"accept": "text/plain"}
+#         )
+#         txt = (r.text or "").strip()
+
+#         if r.status_code == 200 and txt:
+#             low = txt.lstrip().lower()
+#             # If the body is HTML (e.g. a docs page), don’t dump it into UI
+#             if low.startswith("<!doctype html") or low.startswith("<html"):
+#                 return "(Pollinations error: received HTML instead of plain text)"
+#             return txt
+
+#         return f"(Pollinations error {r.status_code}: {txt[:200]})"
+#     except Exception as e:
+#         return f"(Pollinations exception: {e}; last error: {last_err})"
+
+#-------open ai chat ------
+def _openai_chat(
     prompt: str,
     system_text: str | None = None,
     image_data_url: str | None = None,
     *,
-    model: str | None = None,         # accepted but intentionally unused
-    timeout_s: float = 30.0,
-    api_base: str = "https://text.pollinations.ai",
-    **_
+    model: str | None = None,
+    timeout_s: float = 60.0,
+    temperature: float = 0.4,
+    max_tokens: int = 700,
 ) -> str:
     """
-    Pollinations client aligned with their docs:
+    OpenAI text (and optional image) client using Chat Completions.
 
-    - Advanced: POST https://text.pollinations.ai/
-      Sends system + user as OpenAI-style messages, no explicit model.
-    - Simple fallback: GET https://text.pollinations.ai/{prompt}
-
-    No local LLM; all text comes from Pollinations.
+    - Text-only: sends prompt as a normal user message
+    - With image_data_url: sends multimodal content with image_url (data URL supported)
     """
-    import requests
-    from urllib.parse import quote
-    import urllib.parse
+    api_key = _get_openai_key()
+    if not api_key:
+        return "(OpenAI error: missing OPENAI_API_KEY. Set it in st.secrets or environment variables.)"
 
-    # ---- Build prompt, including image ref if any ----
+    url = f"{OPENAI_API_BASE}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    messages = []
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+
     if image_data_url:
-        prompt = (
-            "You are given an image reference below. Use it in your analysis.\n"
-            f"[IMAGE]: {image_data_url}\n\n{prompt}"
-        )
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        })
+    else:
+        messages.append({"role": "user", "content": prompt})
 
-    def _truncate(s: str | None, hard: int) -> str:
-        if not s:
-            return ""
-        return (s[:hard] + " …[truncated]") if len(s) > hard else s
+    payload = {
+        "model": model or OPENAI_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
 
-    user_text   = _truncate(prompt, 3500) 
-    system_text = _truncate(system_text, 800)
-
-    last_err = None
-
-    # ---------- 1) Advanced: POST https://text.pollinations.ai/ ----------
     try:
-        url = api_base.rstrip("/") + "/"
-        payload = {
-            "messages": [
-                {"role": "system", "content": system_text or ""},
-                {"role": "user",   "content": user_text or ""},
-            ]
-        }
-        # Do NOT send "model" – let Pollinations choose a default.
+        r = requests.post(url, headers=headers, json=payload, timeout=timeout_s)
+        if r.status_code != 200:
+            return f"(OpenAI error {r.status_code}: {r.text[:300]})"
 
-        r = requests.post(
-            url,
-            json=payload,
-            timeout=timeout_s,
-            headers={"accept": "text/plain"}  # ask for plain text
-        )
-
-        if r.status_code == 200:
-            ct = (r.headers.get("content-type") or "").lower()
-            txt = (r.text or "").strip()
-
-            # If server gives us plain text, just return it
-            if txt and (ct.startswith("text/") or not ct):
-                return txt
-
-            # If JSON, try to extract a string-ish field
-            try:
-                js = r.json()
-                if isinstance(js, str):
-                    return js.strip()
-                for k in ("response", "text", "output", "message"):
-                    v = js.get(k)
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
-            except Exception:
-                pass
-
-            last_err = f"unexpected POST body (ct={ct}, len={len(r.text)})"
-        else:
-            last_err = f"POST / status {r.status_code}: {r.text[:200]}"
+        js = r.json()
+        return (js["choices"][0]["message"]["content"] or "").strip()
     except Exception as e:
-        last_err = f"POST / exception: {e}"
+        return f"(OpenAI exception: {e})"
 
-    # ---------- 2) Simple fallback: GET https://text.pollinations.ai/{prompt} ----------
-    try:
-        # Combine system + user into one prompt for the simple GET API
-        full_prompt = (
-            (f"System:\n{system_text}\n\nUser:\n{user_text}")
-            if system_text else user_text
-        ) or ""
 
-        url = f"{api_base.rstrip('/')}/{quote(full_prompt)}"
-        r = requests.get(
-            url,
-            timeout=timeout_s,
-            headers={"accept": "text/plain"}
-        )
-        txt = (r.text or "").strip()
-
-        if r.status_code == 200 and txt:
-            low = txt.lstrip().lower()
-            # If the body is HTML (e.g. a docs page), don’t dump it into UI
-            if low.startswith("<!doctype html") or low.startswith("<html"):
-                return "(Pollinations error: received HTML instead of plain text)"
-            return txt
-
-        return f"(Pollinations error {r.status_code}: {txt[:200]})"
-    except Exception as e:
-        return f"(Pollinations exception: {e}; last error: {last_err})"
 
 #-- question anser helper
 def answer_building_question(db_info: str, question: str, lang: str = "en") -> str:
@@ -1645,11 +1729,14 @@ def answer_building_question(db_info: str, question: str, lang: str = "en") -> s
         "Answer:"
     )
 
-    ans = _pollinations_chat(
-        prompt,
-        system_text=sys,
-        api_base=API_BASE,
-    )
+    # ans = _pollinations_chat(
+    #     prompt,
+    #     system_text=sys,
+    #     api_base=API_BASE,
+    # )
+    ans = _openai_chat(prompt, system_text=sys)
+
+
     return (ans or "").strip()
 
 # ---------- small JSON helper for safe-sized prompts ----------
@@ -1795,12 +1882,18 @@ def generate_facade_narrative_pollinations(
             "Remember: do NOT introduce any new factual data that is not supported by [FACTS]."
         )
 
-    return _pollinations_chat(
+    # return _pollinations_chat(
+    #     user_prompt,
+    #     system_text=system_text,
+    #     image_data_url=None,   # IMPORTANT: no image for narrative
+    #     api_base=API_BASE,
+    # )
+    return _openai_chat(
         user_prompt,
         system_text=system_text,
-        image_data_url=None,   # IMPORTANT: no image for narrative
-        api_base=API_BASE,
+        image_data_url=None,
     )
+
 
  
 def chart_explainer_pollinations(
@@ -1868,12 +1961,18 @@ def chart_explainer_pollinations(
             "• Do NOT include any numbers or percentages."
         )
 
-    return _pollinations_chat(
+    # return _pollinations_chat(
+    #     user_prompt,
+    #     system_text=system_text,
+    #     image_data_url=None,   # IMPORTANT: no image here either
+    #     api_base=API_BASE,
+    # )
+    return _openai_chat(
         user_prompt,
         system_text=system_text,
-        image_data_url=None,   # IMPORTANT: no image here either
-        api_base=API_BASE,
+        image_data_url=None,
     )
+
 
 # ---------- text-only fallback (simple & kid-friendly) ----------
 def chart_explainer_text_only(metrics: Dict[str, Any], lang="en") -> str:
@@ -1991,7 +2090,11 @@ def chart_explainer_text_only(metrics: Dict[str, Any], lang="en") -> str:
 
     if lang == "zh":
         # Translate to Traditional Chinese while keeping list formatting
-        zh = _pollinations_chat(
+        # zh = _pollinations_chat(
+        #     f"Translate to Traditional Chinese. Keep '- ' bullet formatting:\n{result_en}",
+        #     system_text="You are a precise translator."
+        # )
+        zh = _openai_chat(
             f"Translate to Traditional Chinese. Keep '- ' bullet formatting:\n{result_en}",
             system_text="You are a precise translator."
         )
